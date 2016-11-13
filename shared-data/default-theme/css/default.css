@@ -460,7 +460,8 @@
 .icon-mime[type="application/x-tar"]:before,
 .icon-mime[type="application/x-winzip"]:before,
 .icon-mime[type="application/x-zip"]:before,
-.icon-mime[type="application/x-zip-compressed"]:before {
+.icon-mime[type="application/x-zip-compressed"]:before,
+.icon-mime[type="application/x-rar-compressed"]:before {
   content: "\e66b";
 }
 .icon-mime[type="audio/amr"]:before,
@@ -525,6 +526,7 @@
 .icon-mime[type="application/pdf"]:before,
 .icon-mime[type="application/x-download"]:before,
 .icon-mime[type="message/rfc822"]:before,
+.icon-mime[type="text/x-log"]:before,
 .icon-mime[type="text/scriptlet"]:before,
 .icon-mime[type="text/plain"]:before,
 .icon-mime[type="text/iuls"]:before,
@@ -7082,6 +7084,13 @@ div.notification-bubble span.action {
   color: #cccccc;
   top: 20%;
 }
+#sidebar a.sidebar-tag-settings {
+  position: absolute;
+  display: inline-block;
+  color: #cccccc;
+  right: 4px;
+  top: 20%;
+}
 /* Sidebar - Subtags */
 #sidebar ul.sidebar-subtags {
   margin-bottom: 8px;
@@ -7247,6 +7256,11 @@ a.sidebar-tag span.sidebar-tag-archive:hover {
 .attachment:hover span.extension {
   color: #4d4d4d;
 }
+
+.attachment-progress-bar {
+  padding-left: 10px;
+}
+
 /* Crypto */
 .compose-crypto-signature.none {
   color: #b3b3b3;
@@ -9054,6 +9068,9 @@ iframe.message-part-html {
 .message-app-note ul li a {
   white-space: normal !important;
   vertical-align: text-top;
+}
+.message-app-note a {
+  cursor: pointer;
 }
 #pile-results .display-modes a img,
 #pile-results .alternate-views a img {

@@ -62,7 +62,7 @@
 {%- if is_dev_version() %}
         <span class="icon icon-outbox"></span>
 {%- endif %}
-      </td><td><i>settings</i>
+      </td><td><i>{{_("settings")}}</i>
 {%- else %}
       </td><td colspan=3 style='border: 0;'>
 {%- endif %}
@@ -84,7 +84,7 @@
      {%- if 'x-mailpile-profile-tag' in p and p['x-mailpile-profile-tag'] in config.tags %}
        {%- set t = mailpile('tags', config.tags[p['x-mailpile-profile-tag']].slug).result.tags.0 %}
      {%- else %}
-       {%- set t = {'stats': {'new': '', 'all': ''}} %}
+       {%- set t = {'slug': 'all-mail', 'stats': {'new': '', 'all': ''}} %}
      {%- endif %}
      {%- if 'x-mailpile-profile-route' in p %}
       {%- set route = config.routes[p['x-mailpile-profile-route']] %}
@@ -94,7 +94,7 @@
     <tr valign="top" class="message">
        <td width='1%'>
          {%- if route %}
-         <a data-from="{{ p.email.0.email }}" class="button-compose" href="#">
+         <a data-from="{{ p.email.0.email }}" class="button-compose" title="Compose as {{ p.email.0.email }}" href="#">
            <span class="icon icon-compose"></span>
          </a>
          {%- endif %}
@@ -105,17 +105,17 @@
                    <span class="icon icon-user" style="color: #070;"></span>
          </a>
        </td><td style='text-align: left;'>
-         <a href="{{ U('/in/inbox/?q=in:', p['x-mailpile-profile-tag']) }}">
+         <a href="{{ U('/in/inbox/?q=in:', t.slug) }}">
            {{ p.fn }}
          </a>
        </td><td style='text-align: left;'>{% for e in p.email %}
          {{ e.email }}{% if not loop.last %}<br>{% endif %}
        {%- endfor %}
-       </td><td><a href="{{ U('/in/', p['x-mailpile-profile-tag'], '/?q=is:unread') }}"><b>{{ t.stats.new }}</b></a>
-       </td><td><a href="{{ U('/in/', p['x-mailpile-profile-tag'], '/') }}">{{ t.stats.all }}</a>
+       </td><td><a href="{{ U('/in/', t.slug, '/?q=is:unread') }}"><b>{{ t.stats.new }}</b></a>
+       </td><td><a href="{{ U('/in/', t.slug, '/') }}">{{ t.stats.all }}</a>
        </td><td>
 {%- if is_dev_version() %}
-          <a href="{{ U('/in/outbox/?q=in:', p['x-mailpile-profile-tag']) }}">?</a>
+          <a href="{{ U('/in/outbox/?q=in:', t.slug) }}">?</a>
 {%- endif %}
        </td><td>
          {%- if not (p['x-mailpile-profile-source'] or []) %}
@@ -175,7 +175,7 @@
       <p><i>{{_("You have not configured any accounts yet.")}}</i></p>
       <p><a class="auto-modal" data-flags="reload" data-icon="icon-user"
             title="{{_("Create a new Account")}}"
-            href="{{ U('/profiles/add/') }}"><button type=button class="button-secondary">
+            href="{{ U('/profiles/add/') }}"><button type=button class="button-primary">
         <span class="icon icon-plus"></span> {{_("Add Account")}}
       </button></a></p>
     </div></td></tr>
@@ -240,4 +240,7 @@
   });
 </script>
 {% endif %}
+<script type='text/javascript'>
+  Mailpile.API.logs_events_get({incomplete: true}, EventLog.invoke_callbacks);
+</script>
 {%- endblock %}
