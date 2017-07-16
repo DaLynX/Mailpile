@@ -21,6 +21,7 @@ from mailpile.plugins.contacts import AddProfile, ListProfiles
 from mailpile.plugins.contacts import ListProfiles
 from mailpile.plugins.migrate import Migrate
 from mailpile.plugins.motd import MOTD_URL_TOR_ONLY_NO_MARS
+from mailpile.plugins.setup_magic_ispdb import STATIC_ISPDB
 from mailpile.plugins.tags import AddTag
 from mailpile.commands import Command
 from mailpile.crypto.gpgi import SignatureInfo, EncryptionInfo
@@ -66,15 +67,19 @@ class SetupMagic(Command):
             'type': 'blank',
             'flag_editable': True,
             'flag_msg_only': True,
+            'flag_allow_add': False,
             'display': 'invisible',
+            'template': 'outgoing',
             'name': _('Blank'),
         },
         'Drafts': {
             'type': 'drafts',
             'flag_editable': True,
             'flag_msg_only': True,
+            'flag_allow_add': False,
             'display': 'priority',
             'display_order': 1,
+            'template': 'outgoing',
             'icon': 'icon-compose',
             'label_color': '03-gray-dark',
             'name': _('Drafts'),
@@ -82,8 +87,10 @@ class SetupMagic(Command):
         'Outbox': {
             'type': 'outbox',
             'flag_msg_only': True,
+            'flag_allow_add': False,
             'display': 'priority',
             'display_order': 3,
+            'template': 'outgoing',
             'icon': 'icon-outbox',
             'label_color': '06-blue',
             'name': _('Outbox'),
@@ -93,6 +100,7 @@ class SetupMagic(Command):
             'flag_msg_only': True,
             'display': 'priority',
             'display_order': 4,
+            'template': 'outgoing',
             'icon': 'icon-sent',
             'label_color': '03-gray-dark',
             'name': _('Sent'),
@@ -127,8 +135,11 @@ class SetupMagic(Command):
             'flag_hides': True,
             'display': 'priority',
             'display_order': 6,
+            'template': 'trash',
             'icon': 'icon-trash',
             'label_color': '13-brown',
+            'auto_after': 91,
+            'auto_action': '!delete',
             'name': _('Trash'),
         },
         # These are magical tags that perform searches and show
@@ -192,6 +203,8 @@ class SetupMagic(Command):
     def basic_app_config(self, session,
                          save_and_update_workers=True,
                          want_daemons=True):
+        session.ui.notify(_('Disabling lockdown'))
+        security.DISABLE_LOCKDOWN = True
         # Create local mailboxes
         session.config.open_local_mailbox(session)
 
@@ -310,6 +323,9 @@ class SetupMagic(Command):
         session.config.slow_worker.add_unique_task(
             session, 'tor-autoconfig', lambda: SetupTor.autoconfig(session))
 
+        session.ui.notify(_('Reenabling lockdown'))
+        security.DISABLE_LOCKDOWN = False
+
     def make_master_key(self):
         session = self.session
         if (session.config.prefs.gpg_recipient not in (None, '', '!CREATE')
@@ -348,6 +364,19 @@ class SetupMagic(Command):
             return True
         else:
             return False
+
+    @classmethod
+    def URLGet(cls, session, url, data=None):
+        if url.lower().startswith('https'):
+            conn_needs = [ConnBroker.OUTGOING_HTTPS]
+        else:
+            conn_needs = [ConnBroker.OUTGOING_HTTP]
+        session.ui.mark('Getting: %s' % url)
+        with ConnBroker.context(need=conn_needs) as context:
+            return urlopen(url, data=data, timeout=10).read()
+
+    def _urlget(self, url, data=None):
+        return self.URLGet(self.session, url, data=data)
 
     def setup_command(self, session):
         pass  # Overridden by children
@@ -458,15 +487,6 @@ class SetupGetEmailSettings(TestableWebbable):
         else:
             self.session.ui.mark(message)
 
-    def _urlget(self, url):
-        if url.lower().startswith('https'):
-            conn_needs = [ConnBroker.OUTGOING_HTTPS]
-        else:
-            conn_needs = [ConnBroker.OUTGOING_HTTP]
-        with ConnBroker.context(need=conn_needs) as context:
-            self.session.ui.mark('Getting: %s' % url)
-            return urlopen(url, data=None, timeout=10).read()
-
     def _username(self, val, email):
         lpart = email.split('@')[0]
         return str(val).replace('%EMAILADDRESS%', email
@@ -496,12 +516,15 @@ class SetupGetEmailSettings(TestableWebbable):
 
     def _rank(self, entry):
         rank = 0
-        proto = entry.get('protocol', 'unknown')
+        proto = entry.get('protocol', 'unknown').lower()
+        auth = entry.get('auth_type', 'unknown').lower()
         for srch, score in [('pop3', 1),
                             ('imap', 2),
                             ('ssl', 10),
-                            ('tls', 5)]:
-            if srch in proto:
+                            ('tls', 5),
+                            ('oauth2', 10),
+                            ('password', 0)]:
+            if srch in proto or srch in auth:
                 rank -= score
         return rank
 
@@ -518,10 +541,14 @@ class SetupGetEmailSettings(TestableWebbable):
 
         return domain
 
-    def _get_xml_autoconfig(self, url, email):
+    def _get_xml_autoconfig(self, url, domain, email):
         try:
             result = {'sources': [], 'routes': []}
-            xml_data = self._urlget(url)
+
+            xml_data = STATIC_ISPDB.get(domain)
+            if not xml_data:
+                xml_data = self._urlget(url)
+
             if xml_data:
                 data = objectify.fromstring(xml_data)
 # FIXME: Massage these so they match the format of the routes and
@@ -547,28 +574,25 @@ class SetupGetEmailSettings(TestableWebbable):
                 except AttributeError:
                     pass
                 for insrv in data.emailProvider.incomingServer:
-                    result['sources'].append({
-                        'protocol': self._source_proto(insrv),
-                        'username': self._username(insrv.username, email),
-                        'auth_type': str(insrv.authentication),
-                        'host': str(insrv.hostname),
-                        'port': str(insrv.port),
-                    })
+                    for auth in insrv.authentication:
+                        result['sources'].append({
+                            'protocol': self._source_proto(insrv),
+                            'username': self._username(insrv.username, email),
+                            'auth_type': str(auth),
+                            'host': str(insrv.hostname),
+                            'port': str(insrv.port)})
                 for outsrv in data.emailProvider.outgoingServer:
-                    result['routes'].append({
-                        'protocol': self._route_proto(outsrv),
-                        'username': self._username(outsrv.username, email),
-                        'auth_type': str(outsrv.authentication),
-                        'host': str(outsrv.hostname),
-                        'port': str(outsrv.port),
-                    })
+                    for auth in outsrv.authentication:
+                        result['routes'].append({
+                            'protocol': self._route_proto(outsrv),
+                            'username': self._username(outsrv.username, email),
+                            'auth_type': str(auth),
+                            'host': str(outsrv.hostname),
+                            'port': str(outsrv.port)})
                 result['sources'].sort(key=self._rank)
                 result['routes'].sort(key=self._rank)
                 return result
         except (IOError, ValueError, AttributeError):
-            # don't forget to delete this
-            # import traceback
-            # traceback.print_exc()
             return None
 
     def _get_ispdb(self, email, domain):
@@ -579,7 +603,7 @@ class SetupGetEmailSettings(TestableWebbable):
 
         self._progress(_('Checking ISPDB for %s') % domain)
         settings = self._get_xml_autoconfig(
-            self.ISPDB_URL % {'domain': domain}, email)
+            self.ISPDB_URL % {'domain': domain}, domain, email)
         if settings:
             self._log_result(_('Found %s in ISPDB') % domain)
             return settings
@@ -589,7 +613,7 @@ class SetupGetEmailSettings(TestableWebbable):
             # FIXME: Make a longer list of 2nd-level public TLDs to ignore
             if domain not in ('co.uk', 'pagekite.me'):
                 return self._get_xml_autoconfig(
-                    self.ISPDB_URL % {'domain': domain}, email)
+                    self.ISPDB_URL % {'domain': domain}, domain, email)
         return None
 
     def _want_anonymity(self):
@@ -627,7 +651,7 @@ class SetupGetEmailSettings(TestableWebbable):
                     self._progress(_('Checking for autoconfig on %s') % dom)
                     settings = self._get_xml_autoconfig(
                         url % {'protocol': protocol, 'domain': dom, 'email': email},
-                        email)
+                        dom, email)
                     if settings:
                         self._log_result(_('Found autoconfig on %s') % dom)
                         return settings

@@ -15,6 +15,11 @@ import ConfigParser
 from urllib import quote, unquote
 from urlparse import urlparse
 
+try:
+    from appdirs import AppDirs
+except ImportError:
+    AppDirs = None
+
 from mailpile.command_cache import CommandCache
 from mailpile.crypto.streamer import DecryptingStreamer
 from mailpile.crypto.gpgi import GnuPG
@@ -33,8 +38,9 @@ from mailpile.vcard import VCardStore
 from mailpile.vfs import vfs, FilePath, MailpileVfsRoot
 from mailpile.workers import Worker, ImportantWorker, DumbWorker, Cron
 import mailpile.i18n
-import mailpile.vfs
+import mailpile.security
 import mailpile.util
+import mailpile.vfs
 
 from mailpile.config.base import *
 from mailpile.config.defaults import APPVER
@@ -61,15 +67,26 @@ class ConfigManager(ConfigDict):
         if workdir:
             return workdir
 
+        # Which profile?
         profile = os.getenv('MAILPILE_PROFILE', 'default')
+
+        # Check if we have a legacy setup we need to preserve
+        workdir = self.LEGACY_DEFAULT_WORKDIR(profile)
+        if not AppDirs or (os.path.exists(workdir) and os.path.isdir(workdir)):
+            return workdir
+
+        # Use platform-specific defaults
+        # via https://github.com/ActiveState/appdirs
+        dirs = AppDirs("Mailpile", "Mailpile ehf")
+        return os.path.join(dirs.user_data_dir, profile)
+
+    @classmethod
+    def LEGACY_DEFAULT_WORKDIR(self, profile):
         if profile == 'default':
             # Backwards compatibility: If the old ~/.mailpile exists, use it.
             workdir = os.path.expanduser('~/.mailpile')
             if os.path.exists(workdir) and os.path.isdir(workdir):
                 return workdir
-
-        # FIXME: the logic below should be rewritten to use the appdirs
-        #        python packages, as per issue #870
 
         basedir = None
         if sys.platform.startswith('win'):
@@ -117,6 +134,7 @@ class ConfigManager(ConfigDict):
         ConfigDict.__init__(self, _rules=rules, _magic=False)
 
         self.workdir = os.path.abspath(workdir or self.DEFAULT_WORKDIR())
+        self.gnupghome = None
         mailpile.vfs.register_alias('/Mailpile', self.workdir)
 
         self.shareddatadir = os.path.abspath(shareddatadir or
@@ -281,6 +299,9 @@ class ConfigManager(ConfigDict):
         # Trigger background-loads of everything
         Rescan(session, 'rescan')._idx(wait=False)
 
+        # Record where our GnuPG keys live
+        self.gnupghome = GnuPG(self).gnupghome()
+
         if keep_lockdown:
             self.sys.lockdown = keep_lockdown
         return rv
@@ -426,6 +447,9 @@ class ConfigManager(ConfigDict):
             self.event_log.ui_watch(session.ui)
         else:
             self.event_log.ui_unwatch(session.ui)
+
+        # Configure security module
+        mailpile.security.KNOWN_TLS_HOSTS = self.tls
 
         # Load VCards
         self.vcards = VCardStore(self, self.data_directory('vcards',
@@ -1064,6 +1088,7 @@ class ConfigManager(ConfigDict):
                 return {"protocol": "smtorp",
                         "host": rcpts[0].split('@')[-1],
                         "port": 25,
+                        "auth_type": "",
                         "username": "",
                         "password": ""}
         routeid = self.get_profile(frm)['messageroute']

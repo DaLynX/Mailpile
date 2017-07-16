@@ -511,7 +511,7 @@ class GnuPG:
             self.homedir = GNUPG_HOMEDIR
             self.gpgbinary = GPG_BINARY
             self.passphrases = None
-            self.passphrase = passphrase
+            self.passphrase = passphrase.get_reader()
             self.use_agent = use_agent
         self.debug = (self._debug_all if (debug or DEBUG_GNUPG)
                       else self._debug_none)
@@ -551,18 +551,28 @@ class GnuPG:
         self.homedir = path
 
     def version(self):
-        """Returns a tuple representing the GnuPG version number."""
+        """Returns a string representing the GnuPG version number."""
         self.event.running_gpg(_('Checking GnuPG version'))
         retvals = self.run(["--version"], novercheck=True)
         return retvals[1]["stdout"][0].split('\n')[0]
 
     def version_tuple(self, update=False):
+        """Returns a tuple representing the GnuPG version number."""
         global GPG_VERSIONS
         if update or not GPG_VERSIONS.get(self.gpgbinary):
             vertext = self.version().strip().split()[-1]
             version = tuple(int(v) for v in vertext.split('.'))
             GPG_VERSIONS[self.gpgbinary] = version
         return GPG_VERSIONS[self.gpgbinary]
+
+    def gnupghome(self):
+        """Returns the location of the GnuPG keyring"""
+        self.event.running_gpg(_('Checking GnuPG home directory'))
+        rv = self.run(["--version"], novercheck=True)[1]["stdout"][0]
+        for l in rv.splitlines():
+            if l.startswith('Home: '):
+                return os.path.expanduser(l[6:].strip())
+        return os.path.expanduser(os.getenv('GNUPGHOME', '~/.gnupg'))
 
     def is_available(self):
         try:
@@ -586,6 +596,11 @@ class GnuPG:
         args.insert(1, "--verbose")
         args.insert(1, "--batch")
         args.insert(1, "--enable-progress-filter")
+
+        # Disable SHA1 in all things GnuPG
+        args[1:1] = ["--personal-digest-preferences=SHA512",
+                     "--digest-algo=SHA512",
+                     "--cert-digest-algo=SHA512"]
 
         if (not self.use_agent) or will_send_passphrase:
             if version < (1, 5):
@@ -622,9 +637,9 @@ class GnuPG:
         gpg_retcode = -1
         proc = None
         try:
-            if not self.passphrase and send_passphrase:
+            if send_passphrase and (self.passphrase is None):
                 self.debug('Running WITHOUT PASSPHRASE %s' % ' '.join(args))
-                self.debug(traceback.format_stack())
+                self.debug(''.join(traceback.format_stack()))
             else:
                 self.debug('Running %s' % ' '.join(args))
 
@@ -635,7 +650,7 @@ class GnuPG:
             # GnuPG is a bit crazy, and requires that the passphrase
             # be sent and the filehandle closed before anything else
             # interesting happens.
-            if self.passphrase and send_passphrase:
+            if send_passphrase and self.passphrase is not None:
                 self.passphrase.seek(0, 0)
                 c = self.passphrase.read(BLOCKSIZE)
                 while c != '':
@@ -860,8 +875,8 @@ class GnuPG:
         >>> g.decrypt(ct)["text"]
         'Hello, World'
         """
-        if passphrase:
-            self.passphrase = passphrase
+        if passphrase is not None:
+            self.passphrase = passphrase.get_reader()
         elif GnuPG.LAST_KEY_USED:
             # This is an opportunistic approach to passphrase usage... we
             # just hope the passphrase we used last time will work again.
@@ -881,7 +896,7 @@ class GnuPG:
                 # gpg output for the keyid and try again if we have it.
                 keyid = None
                 for msg in retvals[1]['status']:
-                    if msg[0] == 'NEED_PASSPHRASE':
+                    if (msg[0] == 'NEED_PASSPHRASE') and (passphrase is None):
                         if self.prepare_passphrase(msg[2], decrypting=True):
                             keyid = msg[2]
                             break
@@ -1152,7 +1167,7 @@ class GnuPG:
         return GnuPGResultParser().parse([None, retvals]).signature_info
 
     def encrypt(self, data, tokeys=[], armor=True,
-                            sign=False, fromkey=None):
+                            sign=False, fromkey=None, throw_keyids=False):
         """
         >>> g = GnuPG(None)
         >>> g.encrypt("Hello, World", to=["smari@mailpile.is"])[0]
@@ -1179,6 +1194,8 @@ class GnuPG:
         if sign and fromkey:
             action.append("--local-user")
             action.append(fromkey)
+        if throw_keyids:
+            action.append("--throw-keyids")
         if fromkey:
             self.prepare_passphrase(fromkey, signing=True)
 
@@ -1195,9 +1212,9 @@ class GnuPG:
         >>> g.sign("Hello, World", fromkey="smari@mailpile.is")[0]
         0
         """
-        if passphrase:
-            self.passphrase = passphrase
-        elif fromkey:
+        if passphrase is not None:
+            self.passphrase = passphrase.get_reader()
+        if fromkey and passphrase is None:
             self.prepare_passphrase(fromkey, signing=True)
 
         if detatch and not clearsign:
@@ -1325,6 +1342,11 @@ class GnuPG:
         """This lets a callback have a chat with the GPG process..."""
         gpg_args = [self.gpgbinary,
                     "--utf8-strings",
+                    # Disable SHA1 in all things GnuPG
+                    "--personal-digest-preferences=SHA512",
+                    "--digest-algo=SHA512",
+                    "--cert-digest-algo=SHA512",
+                    # We're not a human!
                     "--no-tty",
                     "--command-fd=0",
                     "--status-fd=1"] + (gpg_args or [])
@@ -1422,7 +1444,7 @@ def GetKeys(gnupg, config, people):
 
 
 class OpenPGPMimeSigningWrapper(MimeSigningWrapper):
-    CONTAINER_PARAMS = (('micalg', 'pgp-sha1'),
+    CONTAINER_PARAMS = (('micalg', 'pgp-sha512'),
                         ('protocol', 'application/pgp-signature'))
     SIGNATURE_TYPE = 'application/pgp-signature'
     SIGNATURE_DESC = 'OpenPGP Digital Signature'
@@ -1438,6 +1460,8 @@ class OpenPGPMimeEncryptingWrapper(MimeEncryptingWrapper):
     CONTAINER_PARAMS = (('protocol', 'application/pgp-encrypted'), )
     ENCRYPTION_TYPE = 'application/pgp-encrypted'
     ENCRYPTION_VERSION = 1
+
+    # FIXME: Define _encrypt, allow throw_keyids
 
     def crypto(self):
         return GnuPG(self.config, event=self.event)
@@ -1456,6 +1480,7 @@ class OpenPGPMimeSignEncryptWrapper(OpenPGPMimeEncryptingWrapper):
 
     def _encrypt(self, message_text, tokeys=None, armor=False):
         from_key = self.get_keys([self.sender])[0]
+        # FIXME: Allow throw_keyids here.
         return self.crypto().encrypt(message_text,
                                      tokeys=tokeys, armor=True,
                                      sign=True, fromkey=from_key)
@@ -1632,7 +1657,7 @@ class GnuPG14KeyGenerator(GnuPGBaseKeyGenerator):
         ('\n',                                   None,   -1, B.HAVE_KEY)]
 
     def gpg_args(self):
-        return ['--no-use-agent', '--gen-key']
+        return ['--no-use-agent', '--allow-freeform-uid', '--gen-key']
 
 
 class GnuPG21KeyGenerator(GnuPG14KeyGenerator):
@@ -1646,7 +1671,7 @@ class GnuPG21KeyGenerator(GnuPG14KeyGenerator):
     def gpg_args(self):
         # --yes should keep GnuPG from complaining if there already exists
         #       a key with this UID.
-        return ['--yes', '--full-generate-key']
+        return ['--yes', '--allow-freeform-uid', '--full-gen-key']
 
 
 class GnuPGDummyKeyGenerator(GnuPGBaseKeyGenerator):

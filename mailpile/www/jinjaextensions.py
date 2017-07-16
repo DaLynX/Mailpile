@@ -56,6 +56,10 @@ class MailpileCommand(Extension):
         e.globals['is_dev_version'] = s._is_dev_version
         e.globals['is_configured'] = s._is_configured
         e.globals['version_identifier'] = s._version_identifier
+        e.filters['min'] = s._min
+        e.globals['min'] = s._min
+        e.filters['max'] = s._max
+        e.globals['max'] = s._max
         e.filters['random'] = s._random
         e.globals['random'] = s._random
         e.filters['truthy'] = s._truthy
@@ -137,6 +141,12 @@ class MailpileCommand(Extension):
         e.globals['bare_subject'] = s._bare_subject
         e.filters['bare_subject'] = s._bare_subject
 
+        # Filter the raw header list
+        e.globals['get_all'] = s._get_all
+        e.filters['get_all'] = s._get_all
+        e.globals['get_addresses'] = s._get_addresses
+        e.filters['get_addresses'] = s._get_addresses
+
         # Make unruly names a lil bit nicer
         e.globals['nice_name'] = s._nice_name
         e.filters['nice_name'] = s._nice_name
@@ -152,6 +162,8 @@ class MailpileCommand(Extension):
         # Separates Fingerprint in 4 char groups
         e.globals['nice_fingerprint'] = s._nice_fingerprint
         e.filters['nice_fingerprint'] = s._nice_fingerprint
+        e.globals['group_fingerprint'] = s._group_fingerprint
+        e.filters['group_fingerprint'] = s._group_fingerprint
 
         # Converts Filter +/- tags into arrays
         e.globals['make_filter_groups'] = s._make_filter_groups
@@ -658,6 +670,15 @@ class MailpileCommand(Extension):
                              re.sub(self.URL_RE_MAILTO, mailto_fixer,
                                     text)))
 
+    @classmethod
+    def _min(self, sequence):
+        return min(sequence)
+
+    @classmethod
+    def _max(self, sequence):
+        return max(sequence)
+
+    @classmethod
     def _random(self, sequence):
         return sequence[random.randint(0, len(sequence)-1)]
 
@@ -760,20 +781,39 @@ class MailpileCommand(Extension):
         return Markup(result)
 
     @classmethod
-    def _nice_subject(self, metadata):
-        if metadata['subject']:
-            output = re.sub('(?i)^((re|fw|fwd|aw|wg):\s+)+', '', metadata['subject'])
+    def _nice_subject(self, subject):
+        if subject:
+            output = re.sub('(?i)^((re|fw|fwd|aw|wg):\s+)+', '', subject)
         else:
             output = '(' + _("No Subject") + ')'
         return output
 
     @classmethod
-    def _bare_subject(self, metadata):
-        if metadata['subject']:
-            output = re.sub('(?i)^((re|fw|fwd|aw|wg):\s+|\[\S+\]\s+)+', '', metadata['subject'])
+    def _bare_subject(self, subject):
+        if subject:
+            output = re.sub('(?i)^((re|fw|fwd|aw|wg):\s+|\[\S+\]\s+)+', '', subject)
         else:
             output = '(' + _("No Subject") + ')'
         return output
+
+    @classmethod
+    def _get_all(self, pairs, name):
+        return [v for n, v in pairs if n.lower() == name.lower()]
+
+    def _get_addresses(self, pairs, name):
+        from mailpile.mailutils import AddressHeaderParser
+        config = self.env.session.config
+
+        addresses = []
+        for hdr in self._get_all(pairs, name):
+            addresses.extend(AddressHeaderParser(unicode_data=hdr))
+
+        for ai in addresses:
+            vcard = config.vcards.get_vcard(ai.address)
+            if vcard:
+                ai.merge_vcard(vcard)
+
+        return addresses
 
     @classmethod
     def _nice_name(self, name, truncate=100):
@@ -784,9 +824,9 @@ class MailpileCommand(Extension):
     @classmethod
     def _recipient_summary(self, editing_strings, addresses, truncate):
         summary_list = []
-        recipients = (editing_strings['to_aids'] +
-                      editing_strings['cc_aids'] +
-                      editing_strings['bcc_aids'])
+        recipients = (editing_strings.get('to_aids', []) +
+                      editing_strings.get('cc_aids', []) +
+                      editing_strings.get('bcc_aids', []))
         for aid in recipients:
             summary_list.append(addresses[aid].fn)
         summary = ', '.join(summary_list)
@@ -954,6 +994,12 @@ class MailpileCommand(Extension):
             return output
         else:
             return _("No Fingerprint")
+
+    def _group_fingerprint(self, fingerprint, size=4):
+        if fingerprint:
+            return [fingerprint[i:i + size] for i in range(0, len(fingerprint), size)]
+        else:
+            return []
 
     def _make_filter_groups(self, tags):
         split = shlex.split(tags)

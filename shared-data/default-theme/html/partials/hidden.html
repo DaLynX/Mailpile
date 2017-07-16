@@ -199,9 +199,12 @@
 
 <script id="template-modal-loading" type="text/template">
   <div class="modal-dialog">
-    <div class="modal-content">
-      <h1>Working ...</h1>
+    <div class="modal-content" style="width: 42em; text-align: center;">
+      <br><br>
+      <h3>{{ _("Working") }} ...</h3>
+      <br>
       <p>{% include("../img/loading-ellipsis.svg") %}</p>
+      <br clear=both>
     </div>
   </div>
 </script>
@@ -243,15 +246,15 @@
       <% if (message2) { %>
       <span class="action"><%= message2 %>
       <%   if (action_js) { %>
-        - <a <%= action_js %> data-event_id="<%= event_id %>" class="action"><%= action_text %></a>
+        - <a <%= action_js %> data-event_id="<%= event_id %>" class="action <%= action_cls %>"><%= action_text %></a>
       <%   } else if (action_url) { %>
-        - <a href="<%= action_url %>" data-event_id="<%= event_id %>" class="action"><%= action_text %></a>
+        - <a href="<%= action_url %>" data-event_id="<%= event_id %>" class="action <%= action_cls %>"><%= action_text %></a>
       <%   } %>
       </span>
       <% } else if (type === 'nagify') { %>
-      <span class="action">{{"Want to"}} <a href="<%= action %>" data-event_id="<%= event_id %>" class="action notification-nag">{{_("do it now?")}}</a></span>
+      <span class="action">{{"Want to"}} <a href="<%= action %>" data-event_id="<%= event_id %>" class="action notification-nag <%= action_cls %>">{{_("do it now?")}}</a></span>
       <% } else if (undo) { %>
-      <span class="action">{{_("A mistake?")}} <a href="#" data-event_id="<%= event_id %>" class="action notification-undo">{{_("undo")}}</a></span>
+      <span class="action">{{_("A mistake?")}} <a href="#" data-event_id="<%= event_id %>" class="action notification-undo <%= action_cls %>">{{_("undo")}}</a></span>
       <% } %>
     </span>
     <a href="#" data-type="<%= type %>" class="notification-close"><span class="icon-x"></span></a>
@@ -298,8 +301,8 @@
 
 <script id="template-encryption-helper-complete-message" type="text/template">
   <div class="text-center">
-    <p>Great job. You have successfully found encryption keys for all the contacts you are trying to send an encrypted email to. Way to be more secure ;)</p>
-    <button class="button-secondary" onclick="javascript:$('#modal-full').modal('hide');Mailpile.Composer.Crypto.EncryptionToggle('encrypt', mid);">Back To Message</button>
+    <p>Great job. You have successfully found encryption keys for all the contacts you are trying to send an encrypted e-mail to. Way to be more secure ;)</p>
+    <button class="button-secondary" onclick="javascript:Mailpile.UI.hide_modal();Mailpile.Composer.Crypto.EncryptionToggle('encrypt', mid);">Back To Message</button>
   </div>
 </script>
 

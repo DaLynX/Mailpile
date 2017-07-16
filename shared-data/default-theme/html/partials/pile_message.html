@@ -3,7 +3,7 @@
   {%- set encryption_status = [] %}
   {%- set signature_status = [] %}
   {%- set special_text_parts = [] %}
-  {%- macro msg_crypto(part) %}
+  {%- macro msg_crypto(part, forcedisplay) %}
     {#-
      # Parts that do not have own crypto attribute inherit from message itself
      # Watch for changes to the "status" which is present in each encryption and
@@ -15,7 +15,7 @@
     {%- set encryption = show_text_part_encryption(part_encryption and part_encryption.status) %}
     {%- set signature = show_text_part_signature(part_signature and part_signature.status) %}
 
-    {%- if encryption_status and part_encryption.status != encryption_status[-1] %}
+    {%- if encryption_status and (forcedisplay or part_encryption.status != encryption_status[-1]) %}
     <div class="part-crypto-status clearfix crypto-changed border-{{ encryption.color }}">
       <span class="message-inline-crypto-info {{encryption.color}}">&#x2198;</span>
     {%- elif signature_status and part_signature.status != signature_status[-1] %}
@@ -26,7 +26,7 @@
     {%- endif %}
 
     {%- if part_encryption %}
-      {%- if not encryption_status or part_encryption.status != encryption_status[-1] %}
+      {%- if not encryption_status or forcedisplay or part_encryption.status != encryption_status[-1] %}
       <span class="message-inline-crypto-info inline-encryption-info"
             title="{{ encryption.text }}"
             data-crypto_color="{{ encryption.color }}"
@@ -62,7 +62,7 @@
     {%- for part in message.text_parts %}
     <div class="pile-message-text-part">
       {%- if part.data|trim %}
-        {{- msg_crypto(part) }}
+        {{- msg_crypto(part, False) }}
         {%- autoescape false %}
         {%- set part_text = part.data|nice_text|e|urlize|fix_urls(40, metadata.flags.spam) %}
         {%- if part.type in ("text", "pgpsignedtext") %}
@@ -100,12 +100,10 @@
       {%- endif %}
     </div>
     {%- endfor %}
-    {%- set encryption_status = [] %}
-    {%- set signature_status = [] %}
     {%- for part in message.html_parts %}
     <div id="html-part-{{ mid }}-{{ loop.index }}"
          class="pile-message-html-part hide">
-      {{ msg_crypto(part) }}
+      {{ msg_crypto(part, loop.first) }}
       <div class="message-part-html">
         <i class="noframe">{{ _("HTML rendering requires Javascript, sorry!") }}</i>
       </div>
@@ -124,47 +122,60 @@
       <ul class="pile-message-attachments horizontal clearfix">
     {%- for att in message.attachments %}
         <li class="left">
+      {# FIXME: Too ugly, for now. { msg_crypto(att, False) } #}
       {%- set type = attachment_type(att.mimetype) %}
       {%- if (att.filename) %}
         {%- set filename = att.filename %}
       {%- else %}
         {%- set filename = _("Untitled") %}
       {%- endif %}
-      {%- if att.mimetype in ["image/bmp", "image/gif", "image/jpg", "image/jpeg", "image/pjpeg", "image/svg+xml", "image/x-png", "image/png", "application/vnd.google-apps.photo"] %}
-        <a href="{{ U('/message/download/=', mid, '/part-', att.count, '/') }}" class="attachment-image" title="{{filename}}" data-size="{{att.length|friendly_bytes}}" type="{{att.mimetype}}">
-          <div class="preview" style="background-image: url('{{ U('/message/download/preview/=', mid, '/part-', att.count, '/') }}');"></div>
-        </a>
-      {#- elif type == "keys" #}
+      {%- set is_image = att.mimetype in ["image/bmp", "image/gif", "image/jpg", "image/jpeg", "image/pjpeg", "image/svg+xml", "image/x-png", "image/png", "application/vnd.google-apps.photo"] %}
+      {%- set is_pdf = (att.mimetype in ["application/pdf"]) %}
+      {%- set file_parts = filename.split(".") %}
+      {%- set file_parts_length = file_parts|length %}
+      {#- if type == "keys" #}
         {#- do special_text_parts.append("pgp-key") #}
         {#- FIXME: We should omit these (and other boring attachments), but
                    instead add a mode that lets users easily download any part
                    they like. Like mutt! #}
-      {%- else %}
-        <a href="{{ U('/message/download/=', mid, '/part-', att.count, '/') }}" class="attachment" title="{{filename}}" data-size="{{att.length|friendly_bytes}}">
+      {#- else #}
+        <a href="{{ U('/message/download/get/=', mid, '/part-', att.count, '/') }}"
+        {%- if is_image %}
+           class="attachment-image" target=_blank
+        {%- else %}
+           class="attachment"{% if is_pdf %} target="_blank"{% endif %}
+        {%- endif %}
+        {%- if att.crypto.encryption.description %}
+           data-description="{{ att.crypto.encryption.description }}"
+        {%- endif %}
+           data-size="{{att.length|friendly_bytes}}"
+           title="{{filename}}" type="{{att.mimetype}}">
+        {%- if is_image %}
+          <div class="preview" style="background-image: url('{{ U('/message/download/preview/=', mid, '/part-', att.count, '/') }}');"></div>
+        {%- else %}
           <div class="preview">
             <span class="icon-mime" type="{{att.mimetype}}"></span>
-        {%- set file_parts = filename.split(".") %}
-        {%- set file_parts_length = file_parts|length %}
-        {%- if filename != _("Untitled") %}
+          {%- if filename != _("Untitled") %}
             <span class="extension">
               {{- file_parts[file_parts_length - 1] -}}
             </span>
-        {%- endif %}
+          {%- endif %}
           </div>
           <div class="filename">
-        {%- if att.crypto.encryption.status == "decrypted" %}
-            <span class="icon-lock-closed crypto-encrypted"></span>
-        {%- elif att.crypto.encryption.status == "encrypted" %}
-            <span class="icon-lock-closed crypto-error"></span>
-        {%- endif %}
-        {%- if file_parts_length > 2 or filename|length > 20 %}
+          {%- if att.crypto.encryption.status == "decrypted" %}
+            <span class="icon-lock-closed crypto-encrypted"></span>&nbsp;
+          {%- elif att.crypto.encryption.status == "encrypted" %}
+            <span class="icon-lock-closed crypto-error"></span>&nbsp;
+          {%- endif %}
+          {%- if file_parts_length > 2 or filename|length > 20 %}
               {{- att.filename[0:15] -}}...
-        {%- elif file_parts[0] %}
+          {%- elif file_parts[0] %}
               {{- file_parts[0] -}}
-        {%- endif %}
+          {%- endif %}
           </div>
+        {%- endif %}
         </a>
-      {%- endif %}
+      {#- endif #}
         </li>
     {%- endfor %}
       </ul>

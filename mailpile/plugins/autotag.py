@@ -50,13 +50,21 @@ def autotag_configs(config):
     for at_config in config.prefs.autotag:
         yield at_config
         done.append(at_config.match_tag)
+
+    taggers = [k for k in TAGGERS.keys() if k != '_default']
+    if not taggers:
+        return
+
     for tid, tag_info in config.tags.iteritems():
         auto_tagging = tag_info.auto_tag
         if (tid not in done and
                 auto_tagging.lower() not in ('', 'off', 'false')):
             at_config = ConfigDict(_rules=AUTO_TAG_CONFIG)
             at_config.match_tag = tid
+            if auto_tagging not in taggers:
+                auto_tagging = taggers[0]
             at_config.tagger = auto_tagging
+            at_config.trainer = auto_tagging
             yield at_config
 
 
@@ -100,8 +108,7 @@ def LoadAutoTagger(config, at_config):
             trainer = at_config.trainer
             config.autotag[aid] = AutoTagger(
                 TAGGERS.get(tagger, TAGGERS['_default'])(tagger),
-                TRAINERS.get(trainer, TRAINERS['_default'])(trainer),
-            )
+                TRAINERS.get(trainer, TRAINERS['_default'])(trainer))
             SaveAutoTagger(config, at_config)
     return config.autotag[aid]
 
@@ -188,7 +195,7 @@ class Retrain(AutoTagCommand):
         #
         no_trash = ['-in:%s' % t._key for t in config.get_tags(type='trash')]
         interest = {}
-        for ttype in ('replied', 'fwded', 'read', 'tagged'):
+        for ttype in ('replied', 'read', 'tagged'):
             interest[ttype] = set()
             for tag in config.get_tags(type=ttype):
                 interest[ttype] |= idx.search(session,
@@ -222,8 +229,7 @@ class Retrain(AutoTagCommand):
                         interest[etag._key] = idx.search(session, srch
                                                          ).as_set()
                     interesting.append(etag._key)
-                interesting.extend(['replied', 'fwded', 'read', 'tagged',
-                                    None])
+                interesting.extend(['replied', 'read', 'tagged', None])
 
                 # Go through the interest types in order of preference and
                 # while we still lack training data, add to the training set.
@@ -235,8 +241,12 @@ class Retrain(AutoTagCommand):
                         # budget 33% True, 67% False.
                         full_size = int(at_config.corpus_size *
                                         (0.33 if which else 0.67))
-                        want = min(full_size // 4,
+                        want = min(full_size // len(interesting),
                                    max(0, full_size - len(tset)))
+                        # Make sure we always fully utilize our budget
+                        if full_size > len(tset) and not ttype:
+                            want = full_size - len(tset)
+
                         if want:
                             if ttype:
                                 adding = sorted(list(mset & interest[ttype]))
@@ -364,7 +374,9 @@ class AutoTag(Classify):
                 at_tag = config.get_tag(at_config.match_tag)
                 if not at_tag:
                     continue
-                want = scores[mid].get(at_tag._key, (False, ))[0]
+
+                wants = scores[mid].get(at_tag._key, [(False, )])
+                want = bool([True for w in wants if w[0]])
 
                 if want is True:
                     if at_config.match_tag not in tag:

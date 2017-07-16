@@ -15,9 +15,11 @@ from mailpile.crypto.gpgi import OpenPGPMimeSigningWrapper
 from mailpile.crypto.gpgi import OpenPGPMimeEncryptingWrapper
 from mailpile.crypto.gpgi import OpenPGPMimeSignEncryptWrapper
 from mailpile.crypto.mime import UnwrapMimeCrypto, MessageAsString
+from mailpile.crypto.mime import OBSCURE_HEADERS_MILD, OBSCURE_HEADERS_EXTREME
+from mailpile.crypto.mime import ObscureSubject
 from mailpile.crypto.state import EncryptionInfo, SignatureInfo
 from mailpile.eventlog import GetThreadEvent
-from mailpile.mailutils import Email, ExtractEmails, ClearParseCache
+from mailpile.mailutils import Email, AddressHeaderParser, ClearParseCache
 from mailpile.mailutils import MakeContentID
 from mailpile.plugins import PluginManager, EmailTransform
 from mailpile.plugins.vcard_gnupg import PGPKeysImportAsVCards
@@ -30,11 +32,12 @@ _plugins = PluginManager(builtin=__file__)
 
 class ContentTxf(EmailTransform):
     def _wrap_key_in_html(self, title, keydata):
-        return (
-            "<html><body><h1>%(title)s</h1><p>\n\n%(description)s\n\n</p>"
+        return ((
+            "<html><head><meta charset='utf-8'></head><body>\n"
+            "<h1>%(title)s</h1><p>\n\n%(description)s\n\n</p>"
             "<pre>\n%(key)s\n</pre><hr>"
             "<i><a href='%(ad_url)s'>%(ad)s</a>.</i></body></html>"
-            ) % self._wrap_key_in_html_vars(title, keydata)
+            ) % self._wrap_key_in_html_vars(title, keydata)).encode('utf-8')
 
     def _wrap_key_in_html_vars(self, title, keydata):
         return {
@@ -55,12 +58,10 @@ class ContentTxf(EmailTransform):
 
         # Prefer to just get everything from the profile VCard, in the
         # common case...
-        profile = self.config.vcards.get_vcard(sender)
-        if profile:
-            sender_keyid = profile.pgp_key
-            crypto_format = profile.crypto_format or 'none'
-        else:
-            crypto_format = 'none'
+        profile = self._get_sender_profile(sender, kwargs)
+        if profile['vcard'] is not None:
+            sender_keyid = profile['vcard'].pgp_key
+        crypto_format = profile.get('crypto_format') or 'none'
 
         # Parse the openpgp_header data from the crypto_format
         openpgp_header = [p.split(':')[-1]
@@ -100,7 +101,7 @@ class ContentTxf(EmailTransform):
             if sender_keyid:
                 keys = gnupg.list_keys(selectors=[sender_keyid])
             else:
-                keys = gnupg.address_to_keys(ExtractEmails(sender)[0])
+                keys = gnupg.address_to_keys(AddressHeaderParser(sender).addresses_list()[0])
 
             key_count = 0
             for fp, key in keys.iteritems():
@@ -143,24 +144,45 @@ class ContentTxf(EmailTransform):
 class CryptoTxf(EmailTransform):
     def TransformOutgoing(self, sender, rcpts, msg,
                           crypto_policy='none',
-                          prefer_inline=False,
+                          crypto_format='default',
                           cleaner=lambda m: m,
                           **kwargs):
         matched = False
         if 'pgp' in crypto_policy or 'gpg' in crypto_policy:
             wrapper = None
+
+            # Set defaults
+            prefer_inline = kwargs.get('prefer_inline', False)
+            if 'obscure_all_meta' in crypto_format:
+                obscured = OBSCURE_HEADERS_EXTREME
+            elif 'obscure_meta' in crypto_format:
+                obscured = OBSCURE_HEADERS_MILD
+            elif self.config.prefs.encrypt_subject:
+                obscured = {'subject': ObscureSubject}
+            else:
+                obscured = {}
+
             if 'sign' in crypto_policy and 'encrypt' in crypto_policy:
                 wrapper = OpenPGPMimeSignEncryptWrapper
-            elif 'sign' in crypto_policy:
-                wrapper = OpenPGPMimeSigningWrapper
+                prefer_inline = 'prefer_inline' in crypto_format
             elif 'encrypt' in crypto_policy:
                 wrapper = OpenPGPMimeEncryptingWrapper
+                prefer_inline = 'prefer_inline' in crypto_format
+            elif 'sign' in crypto_policy:
+                # When signing only, we 1) prefer inline by default, based
+                # on this: https://github.com/mailpile/Mailpile/issues/1693
+                # and 2) don't obscure any headers as that's pointless.
+                wrapper = OpenPGPMimeSigningWrapper
+                prefer_inline = 'pgpmime' not in crypto_format
+                obscured = {}
+
             if wrapper:
                 msg = wrapper(self.config,
                               sender=sender,
                               cleaner=cleaner,
                               recipients=rcpts,
                               use_html_wrapper=self.config.prefs.gpg_html_wrap,
+                              obscured_headers=obscured
                               ).wrap(msg, prefer_inline=prefer_inline)
                 matched = True
 

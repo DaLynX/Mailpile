@@ -2,18 +2,21 @@ import random
 import hashlib
 import smtplib
 import socket
+import ssl
 import sys
 import time
 
 import mailpile.util
+from mailpile.auth import IndirectPassword
 from mailpile.conn_brokers import Master as ConnBroker
-from mailpile.util import *
+from mailpile.eventlog import Event
 from mailpile.i18n import gettext as _
 from mailpile.i18n import ngettext as _n
 from mailpile.config.detect import ssl, socks
 from mailpile.mailutils import CleanMessage, MessageAsString
-from mailpile.eventlog import Event
+from mailpile.mailutils import InsecureSmtpError
 from mailpile.safe_popen import Popen, PIPE
+from mailpile.util import *
 from mailpile.vcard import VCardLine
 
 
@@ -109,6 +112,7 @@ def _RouteTuples(session, from_to_msg_ev_tuples, test_route=None):
                 route = {"protocol": "",
                          "username": "",
                          "password": "",
+                         "auth_type": "",
                          "command": "",
                          "host": "",
                          "port": 25}
@@ -153,19 +157,26 @@ def SendMail(session, msg_mid, from_to_msg_ev_tuples,
             ev.data['delivered'] = len([k for k in ev.private_data
                                         if ev.private_data[k]])
 
-    def mark(msg, events, log=True):
+    def mark(msg, events, log=True, clear_errors=False):
         for ev in events:
             ev.flags = Event.RUNNING
             ev.message = msg
+            if clear_errors:
+                if 'last_error' in ev.data:
+                    del ev.data['last_error']
+                if 'last_error_details' in ev.data:
+                    del ev.data['last_error_details']
             if log:
                 session.config.event_log.log_event(ev)
         session.ui.mark(msg)
 
-    def fail(msg, events, details=None):
+    def fail(msg, events, details=None, exception=SendMailError):
         mark(msg, events, log=True)
         for ev in events:
             ev.data['last_error'] = msg
-        raise SendMailError(msg, details=details)
+            if details:
+                ev.data['last_error_details'] = details
+        raise exception(msg, details=details)
 
     def smtp_do_or_die(msg, events, method, *args, **kwargs):
         rc, msg = method(*args, **kwargs)
@@ -186,7 +197,7 @@ def SendMail(session, msg_mid, from_to_msg_ev_tuples,
                                 to, route_description))
         sm_write = sm_close = lambda: True
 
-        mark(_('Sending via %s') % route_description, events)
+        mark(_('Sending via %s') % route_description, events, clear_errors=True)
 
         if route['command']:
             # Note: The .strip().split() here converts our cmd into a list,
@@ -214,7 +225,9 @@ def SendMail(session, msg_mid, from_to_msg_ev_tuples,
         elif route['protocol'] in ('smtp', 'smtorp', 'smtpssl', 'smtptls'):
             proto = route['protocol']
             host, port = route['host'], route['port']
-            user, pwd = route['username'], route['password']
+            user = route['username']
+            pwd = IndirectPassword(session.config, route['password'])
+            auth_type = route['auth_type'] or ''
             smtp_ssl = proto in ('smtpssl', )  # FIXME: 'smtorp'
 
             for ev in events:
@@ -239,7 +252,7 @@ def SendMail(session, msg_mid, from_to_msg_ev_tuples,
                 try:
                     with ConnBroker.context(need=conn_needs) as ctx:
                         server.connect(host, int(port))
-                        server.ehlo_or_helo_if_needed()
+                    server.ehlo_or_helo_if_needed()
                 except (IOError, OSError, smtplib.SMTPServerDisconnected):
                     fail(_('Failed to connect to %s') % host, events,
                          details={'connection_error': True})
@@ -247,32 +260,55 @@ def SendMail(session, msg_mid, from_to_msg_ev_tuples,
                 return server
 
             def sm_startup():
-                server = sm_connect_server()
-                if not smtp_ssl:
-                    # We always try to enable TLS, even if the user just
-                    # requested plain-text smtp.  But we only throw errors
-                    # if the user asked for encryption.
-                    try:
-                        server.starttls()
-                        server.ehlo_or_helo_if_needed()
-                    except:
-                        if proto == 'smtptls':
-                            raise InsecureSmtpError()
-                        else:
-                            server = sm_connect_server()
+                try:
+                    server = sm_connect_server()
+                    if not smtp_ssl:
+                        # We always try to enable TLS, even if the user just
+                        # requested plain-text smtp.  But we only throw errors
+                        # if the user asked for encryption.
+                        try:
+                            server.starttls()
+                            server.ehlo_or_helo_if_needed()
+                        except:
+                            if proto == 'smtptls':
+                                raise
+                            else:
+                                server = sm_connect_server()
+                except (ssl.CertificateError, ssl.SSLError):
+                    fail(_('Failed to make a secure TLS connection'),
+                         events,
+                         details={
+                             'tls_error': True,
+                             'server': '%s:%d' % (host, port)},
+                         exception=InsecureSmtpError)
+
                 serverbox[0] = server
 
-                if user and pwd:
+                if user:
                     try:
-                        server.login(user.encode('utf-8'),
-                                     pwd.encode('utf-8'))
+                        if auth_type.lower() == 'oauth2':
+                            from mailpile.plugins.oauth import OAuth2
+                            tok_info = OAuth2.GetFreshTokenInfo(session, user)
+                            if not (user and tok_info and tok_info.access_token):
+                                fail(_('Access denied by mail server'),
+                                     events,
+                                     details={'oauth_error': True,
+                                              'username': user})
+                            authstr = (OAuth2.XOAuth2Response(user, tok_info)
+                                       ).encode('base64').replace('\n', '')
+                            server.docmd('AUTH', 'XOAUTH2 ' + authstr)
+                        else:
+                            server.login(user.encode('utf-8'),
+                                         (pwd or '').encode('utf-8'))
                     except UnicodeDecodeError:
                         fail(_('Bad character in username or password'),
                              events,
-                             details={'authentication_error': True})
+                             details={'authentication_error': True,
+                                      'username': user})
                     except smtplib.SMTPAuthenticationError:
                         fail(_('Invalid username or password'), events,
-                             details={'authentication_error': True})
+                             details={'authentication_error': True,
+                                      'username': user})
                     except smtplib.SMTPException:
                         # If the server does not support authentication, assume
                         # it's passwordless and try to carry one anyway.

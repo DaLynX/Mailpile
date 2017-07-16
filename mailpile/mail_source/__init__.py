@@ -142,6 +142,10 @@ class BaseMailSource(threading.Thread):
                                                       data_id=my_config._key))
             if events:
                 self.event = events[0]
+                if my_config.enabled:
+                    self.event.message = _('Starting up')
+                else:
+                    self.event.message = _('Disabled')
             else:
                 self.event = config.event_log.log(
                     source=self,
@@ -164,9 +168,13 @@ class BaseMailSource(threading.Thread):
         self.session.config.save_worker.add_unique_task(
             self.session, 'Save config', self.session.config.save)
 
-    def _log_status(self, message):
+    def _log_status(self, message, clear_errors=False):
         # If the user renames our parent_tag, we assume the name change too.
         self.update_name_to_match_tag()
+        if clear_errors:
+            err = self.event.data.get('connection', {}).get('error', [False])
+            if err[0]:
+                err[:] = [False, _('Nothing is wrong')]
         self.event.message = message
         self.session.config.event_log.log_event(self.event)
         self.session.ui.mark(message)
@@ -208,7 +216,8 @@ class BaseMailSource(threading.Thread):
                 not self.my_config.enabled):
             if log:
                 self._log_status(_('Interrupted: %s')
-                                 % (self._interrupt or _('Shutting down')))
+                                     % (self._interrupt or _('Shutting down')),
+                                 clear_errors=(not self._interrupt))
             if clear:
                 self._interrupt = None
             return True
@@ -356,6 +365,7 @@ class BaseMailSource(threading.Thread):
         status = []
         if discovered > 0:
             status.append(_('Discovered %d mailboxes') % discovered)
+            self._last_rescan_completed = False
         if rescanned > 0:
             status.append(_('Processed %d mailboxes') % rescanned)
         if errors:
@@ -710,6 +720,8 @@ class BaseMailSource(threading.Thread):
                 'type': 'mailbox',
                 'parent': parent or '',
                 'label': label,
+                'flag_allow_add': False,
+                'flag_allow_del': False,
                 'icon': icon or 'icon-tag',
                 'display': 'tag' if visible else 'archive',
             })
@@ -741,10 +753,38 @@ class BaseMailSource(threading.Thread):
             'mailbox_id': mbx_key,
             'copied_messages': 0,
             'copied_bytes': 0,
+            'deleting': False,
             'complete': False
         }
         scan_args = scan_args or {}
+        policy = self._policy(mbx_cfg)
         count = 0
+
+        def maybe_delete_from_server(loc, src):
+            # Delete from source, if that's our policy.
+            if policy != 'move':
+                return
+
+            downloaded = list(set(src.keys()) & set(loc.source_map.keys()))
+            downloaded.sort(key=self._msg_key_order)
+
+            should = _('Should delete %d messages') % len(downloaded)
+            if 'sources' in config.sys.debug and downloaded:
+                session.ui.debug(should)
+
+            if config.prefs.allow_deletion:
+                try:
+                    for i, key in enumerate(downloaded):
+                        progress['deleting'] = '%d/%d' % (i, len(downloaded))
+                        src.remove(key)
+                except:
+                    # Just ignore errors for now, we'll try again later.
+                    if 'sources' in config.sys.debug:
+                        session.ui.debug(traceback.format_exc())
+            else:
+                progress['deleting'] = '. '.join([
+                    _('Deletion is disabled'), should])
+
         try:
             with self._lock:
                 loc = config.open_mailbox(session, mbx_key, prefer_local=True)
@@ -807,9 +847,11 @@ class BaseMailSource(threading.Thread):
 
                 stop_after -= 1
                 if (stop_after == 0) or (deadline and time.time() > deadline):
+                    maybe_delete_from_server(loc, src)
                     progress['stopped'] = True
                     return count
             progress['complete'] = True
+
         except IOError:
             # These just abort the download/read, which we're going to just
             # take in stride for now.
@@ -823,6 +865,8 @@ class BaseMailSource(threading.Thread):
             raise
         finally:
             progress['running'] = False
+
+        maybe_delete_from_server(loc, src)
         return count
 
     def rescan_mailbox(self, mbx_key, mbx_cfg, path, stop_after=None):
@@ -919,6 +963,11 @@ class BaseMailSource(threading.Thread):
     def is_mailbox(self, fn):
         return False
 
+    def _summarize_auth(self):
+        return sha1b64(self.my_config.auth_type, '-',
+                       self.my_config.username, '-',
+                       self.my_config.password)
+
     def run(self):
         play_nice(18)  # Reduce priority quite a lot
 
@@ -937,15 +986,28 @@ class BaseMailSource(threading.Thread):
 
         self._loop_count = 0
         while self._loop_count == 0 or self._sleep(self._jitter(sleeptime())):
-            self._loop_count += 1
-            if not self.my_config.enabled:
+            self.event.data['enabled'] = self.my_config.enabled
+            self.event.data['profile_id'] = self.my_config.profile
+            if self.my_config.enabled:
+                self._loop_count += 1
+            else:
+                if self._loop_count > 1:
+                    self._log_status(_('Disabled'), clear_errors=True)
                 self._loop_count = 1
+                self.close()
                 continue
 
             self.name = self.my_config.name  # In case the config changes
             self._update_unknown_state()
             if not self.session.config.index:
                 continue
+
+            conn_err = self.event.data.get('connection', {}).get('error')
+            if conn_err and conn_err[0] in ('oauth2', 'auth'):
+                if ((self._loop_count % 100 != 0)
+                        and self._summarize_auth() == conn_err[-1]):
+                    self.session.ui.debug('Auth unchanged, doing nothing')
+                    continue
 
             waiters, self._rescan_waiters = self._rescan_waiters, []
             for b, e, s in waiters:
@@ -985,7 +1047,7 @@ class BaseMailSource(threading.Thread):
                 self.session = _original_session
             self._update_unknown_state()
         self.close()
-        self._log_status(_('Shut down'))
+        self._log_status(_('Shut down'), clear_errors=True)
         self._save_state()
 
     def _log_conn_errors(self):

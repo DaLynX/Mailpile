@@ -1,9 +1,11 @@
 {%    set message = result.data.messages.get(mid)
+%}{%  set message_errors = (result.errors or {}).get(mid)
 %}{%  set metadata = result.data.metadata[mid]
 %}{%  set thread = result.data.threads[metadata.thread_mid]
 %}{%  set conversation_count = thread|length
 %}{%  set cleartext = show_text_part_encryption('none')
 %}{%  set unsigned = show_text_part_signature('none')
+%}{%  set to_cc = metadata.to_aids + metadata.cc_aids
 %}{%  set from = result.data.addresses[metadata.from.aid]
 %}{%  if not from
 %}{%    set from = {'fn': 'Unknown sender', 'email': ''}
@@ -20,7 +22,7 @@
 %}{{      m_metadata.urls.thread
 }}{%    endif
 %}{%  endmacro %}
-<tr class="pile-message pile-message-{{mid}} result has-mid
+<tr class="pile-message pile-message-{{mid}}{% if mid != this_mid %} pile-message-{{this_mid}}{% endif %} result has-mid
            {%- for tid in metadata.tag_tids %} in_{{result.data.tags[tid].slug}}{% endfor %}
            {%- if message %} full-message has-url{% endif %}
            {%- if metadata.flags.replied %} replied{% endif %}"
@@ -44,19 +46,21 @@
 {%- endif %}
     data-mid="{{mid}}">
   <td class="draggable"></td>
-{% if message %}
+{% if message or message_errors %}
   <td class="message-nav">
   {%- if previous_mid %}
     <a href="{{msg_url(previous_mid)}}" title="{{_('Previous Conversation')}}"
-       data-noblank=1 class="icon">&#x25B2;</a><br>
+       id="previous-message" data-noblank=1 data-keep-selection=1
+       class="icon">&#x25B2;</a><br>
   {%- endif %}
     <a href="{{ U(add_state_query_string(state.command_url, state, {
                     'url_args_remove': [['view','']]}))}}"
-       title="{{_('Close')}}"
-       data-noblank=1><span class='icon icon-circle-x'></span></a><br>
+       data-noblank=1 data-keep-selection=1 title="{{_('Close')}}"
+       id="close-message"><span class='icon icon-circle-x'></span></a><br>
   {%- if next_mid %}
     <a href="{{msg_url(next_mid)}}" title="{{_('Next Conversation')}}"
-       data-noblank=1 class="icon">&#x25BC;</a><br>
+       id="next-message" data-noblank=1 data-keep-selection=1
+       class="icon">&#x25BC;</a><br>
   {%- endif %}
   </td>
   <td class="from" data-fn="{{metadata.from.fn}}" data-address="{{metadata.from.address}}">
@@ -67,6 +71,11 @@
       <div class="header-cooked header-from">
         <h3 class="header-name {{ unsigned.color }}">
           {{_("From")}}:
+{#
+ #  FIXME: We are using the From data given to us in the metadata section,
+ #         which may differ from the message contents, especially in a
+ #         memory-hole substitution world. This needs reworking.
+ #}
           <span class="icon message-metadata-crypto-info {{ unsigned.icon }}"
                 title="{{ unsigned.text }}"
                 data-crypto_icon="{{ unsigned.icon }}"
@@ -87,9 +96,9 @@
           <span class="address-email"><span class="punct">&lt;</span>{{metadata.from.address}}<span class="punct">&gt;</span></span>
         </span>
       </div>
-    {%- for txt, which, rcpts in (('To', 'to', metadata.to_aids),
-                                  ('CC', 'cc', metadata.cc_aids),
-                                  ('BCC', 'bcc', [])) %}{# FIXME #}
+    {%- for txt, which, rcpts in (('To', 'to', get_addresses(message.header_list, "to")),
+                                  ('CC', 'cc', get_addresses(message.header_list, "cc")),
+                                  ('BCC', 'bcc', get_addresses(message.header_list, "bcc"))) %}
       {%- if rcpts %}
       <div class="header-cooked header-{{which}}">
         <h3 class="header-name {{ unsigned.color }}">
@@ -100,15 +109,12 @@
                 data-crypto_color="{{ unsigned.color }}"
                 data-crypto_message="{{ unsigned.message }}"></span>
         </h3>
-        {%- for aid in rcpts %}
-          {%- set ai = result.data.addresses[aid] %}
-          {%- if ai %}
+        {%- for ai in rcpts %}
         <span class="header-value" title='{{ai.fn}} &lt;{{ai.address}}&gt;'>
           <span class="address-avatar"><img src="{{ show_avatar(ai) }}"></span>
-          <span class="address-name"><span class="punct">"</span>{{ai.fn}}<span class="punct">"</span></span>
+          <span class="address-name"><span class="punct">"</span>{{ai.fn or ai.address}}<span class="punct">"</span></span>
           <span class="address-email"><span class="punct">&lt;</span>{{ai.address}}<span class="punct">&gt;</span></span><span class="punct">,</span>
         </span>
-          {%- endif %}
         {%- endfor %}
       </div>
       {%- endif %}
@@ -127,8 +133,12 @@
     <a><img src="{{ show_avatar(from) }}"></a>
   </td>
   <td class="from">
-    <a href="{{msg_url(mid)}}" data-noblank=1
-       title="{{metadata.from.fn}} &lt;{{metadata.from.address}}&gt;">
+    <a href="{{msg_url(mid)}}" data-noblank=1 data-keep-selection=1
+       title="{{_("From") }}: {{metadata.from.fn}} &lt;{{metadata.from.address}}&gt;
+{{ _("To") }}: {% if to_cc %}
+ {%- set to1 = result.data.addresses[to_cc[0]] %}
+ &lt;{{ to1.address }}&gt;{% if to_cc|length > 1 %} +{{ to_cc|length -1 }}{% endif %}
+{%- else %}({{_("unknown")}}){% endif %}">
       {% if metadata.from.fn %}{{ metadata.from.fn|nice_name(28) }}{% else %}({{_("No Name")}}){% endif %}
       {% if conversation_count > 1 %}<span class="conversation-count">{{conversation_count}}</span>{% endif %}
       {% if metadata.flags.replied %}<span class="icon-reply"></span>{% else %}
@@ -160,9 +170,12 @@
   {%- endif %}
   </td>
   <td class="subject">
-{%- if not message %}
-    <a class="item-subject" title="{{metadata.body.snippet}}" data-noblank=1
-       href="{{msg_url(mid)}}">{{ nice_subject(metadata) }}</a>
+{%- if message_errors %}
+    {% include("partials/error_message_missing.html") %}
+{%- elif not message %}
+    <a class="item-subject" title="{{metadata.body.snippet}}"
+       data-noblank=1 data-keep-selection=1
+       href="{{msg_url(mid)}}">{{ nice_subject(metadata.subject) }}</a>
 {%- else %}
     <div class="message-container">
     {%- if message.editing_strings %}
@@ -199,7 +212,8 @@
         {%- endif %}
         <ul class="alternate-views">
           {%- for elem in get_ui_elements('display_modes', state, context='/message/') %}
-          <li><a title="{{ elem.description }}" data-noblank=1
+          <li><a title="{{ elem.description }}"
+                 data-noblank=1 data-keep-selection=1
                  href="{{ elem.url|add_state_query_string({'query_args': {'mid': [mid]}}, elem)|url_path_fix }}">
             {%- if elem.icon and '.' in elem.icon -%}
             <img class="navigation-icon" src="{{ U(elem.icon) }}">
@@ -209,7 +223,7 @@
           </li>
           {%- endfor %}
           <li><a title="{{ _('Switch to full conversation view') }}"
-                 data-noblank=1 href="{{ U('/thread/=', mid, '/') }}">
+                 data-noblank=1 data-keep-selection=1 href="{{ U('/thread/=', mid, '/') }}">
             <span class="icon icon-forum"></span></a></li>
           <li><a title="{{ _('Display message source code') }}"
                  target=_blank href="{{ U('/message/raw/=', mid, '/as.text') }}">
@@ -219,7 +233,14 @@
             <span class="icon icon-code"></span></a></li>
         </ul>
         <div class="message-subject">
-          {{ nice_subject(metadata) }}
+          {%- set subjects = get_all(message.header_list, "subject") %}
+          {%- if subjects %}
+            {%- for value in subjects %}
+              {{ nice_subject(value) }}
+            {%- endfor %}
+          {%- else %}
+            {{ nice_subject(None) }}
+          {%- endif %}
         </div>
       </div>
 {%- include('partials/pile_message.html') -%}

@@ -7,6 +7,7 @@ review and testing.
 
 """
 import copy
+import hashlib
 import json
 import ssl
 import time
@@ -17,11 +18,13 @@ from mailpile.i18n import gettext as _
 from mailpile.i18n import ngettext as _n
 from mailpile.util import *
 
+DISABLE_LOCKDOWN = False
 
 ##[ These are the sys.lockdown restrictions ]#################################
 
 
 def _lockdown(config):
+    if DISABLE_LOCKDOWN: return False
     lockdown = config.sys.lockdown or 0
     try:
         return int(lockdown)
@@ -36,6 +39,7 @@ def _lockdown(config):
 
 
 def in_disk_lockdown(config):
+    if DISABLE_LOCKDOWN: return False
     # If we've dropped below 50% of our target free space, we stop
     # almost all operations and go into lockdown. This makes the
     # Mailpile effectively read-only, which should be safe without
@@ -46,12 +50,14 @@ def in_disk_lockdown(config):
 
 
 def _lockdown_minimal(config):
+    if DISABLE_LOCKDOWN: return False
     if _lockdown(config) != 0:
         return _('In lockdown, doing nothing.')
     return False
 
 
 def _lockdown_config(config):
+    if DISABLE_LOCKDOWN: return False
     # This is just like lockdown_basic, except we allow the user to
     # change the config so they can adjust the minimum free disk space
     # requirement if it was accidentally made too strict.
@@ -61,10 +67,12 @@ def _lockdown_config(config):
 
 
 def _lockdown_basic(config):
+    if DISABLE_LOCKDOWN: return False
     return _lockdown_config(config) or in_disk_lockdown(config)
 
 
 def _lockdown_strict(config):
+    if DISABLE_LOCKDOWN: return False
     if _lockdown(config) > 1:
         return _('In lockdown, doing nothing.')
     return in_disk_lockdown(config)
@@ -175,24 +183,24 @@ def http_content_security_policy(http_server):
             "img-src 'self' data:")
 
 
-def make_csrf_token(req, session_id, ts=None):
+def make_csrf_token(secret, session_id, ts=None):
     """
     Generate a hashed token from the current timestamp, session ID and
     the server secret, to avoid CSRF attacks.
     """
     ts = '%x' % (ts if (ts is not None) else time.time())
-    payload = [req.server.secret, session_id, ts]
+    payload = [secret, session_id, ts]
     return '%s-%s' % (ts, b64w(sha512b64('-'.join(payload))))
 
 
-def valid_csrf_token(req, session_id, csrf_token):
+def valid_csrf_token(secret, session_id, csrf_token):
     """
     Check the validity of a CSRF token.
     """
     try:
         when = int(csrf_token.split('-')[0], 16)
         return ((when > time.time() - CSRF_VALIDITY) and
-                (csrf_token == make_csrf_token(req, session_id, ts=when)))
+                (csrf_token == make_csrf_token(secret, session_id, ts=when)))
     except (ValueError, IndexError):
         return False
 
@@ -362,6 +370,11 @@ class SecurePassphraseStorage(object):
             return ''
         return chr(self.data[offset])
 
+    def get_passphrase(self):
+        if self.data is None:
+            return ''
+        return intlist_to_string(self.data)
+
     def get_reader(self):
         class SecurePassphraseReader(object):
             def __init__(self, sps):
@@ -393,36 +406,133 @@ class SecurePassphraseStorage(object):
 ##[ TLS/SSL security code ]##################################################
 #
 # We monkey-patch ssl.wrap_socket and ssl.SSLContext.wrap_socket so we can
-# implement and enforce our own policies here. For now all we're doing is
-# avoiding SSLv3, but more is planned...
+# implement and enforce our own policies here.
 #
+KNOWN_TLS_HOSTS = {}
 
-def tls_configure(context, args, kwargs):
-    kwargs = copy.copy(kwargs)
-    # FIXME:
-    #  - Ensure the caller (conn_broker) can pass in SNI etc.
-    #  - Verify certificates somehow. TOFU? CAs? Both?
-    #  - Allow self-signed certificates somehow!
+
+def tls_sock_cert_sha256(sock=None, cert=None):
+    if cert is None:
+        try:
+            peer_cert = sock.getpeercert(binary_form=True)
+        except ValueError:
+            return None
+    else:
+        peer_cert = cert
+
+    if peer_cert:
+        return unicode(
+            hashlib.sha256(peer_cert).digest().encode('base64').strip())
+    else:
+        return None
+
+
+def tls_configure(sock, context, args, kwargs):
+    # FIXME: We should convert positional arguments to named ones, to
+    #        make sure everything Just Works.
     #
-    if not hasattr(ssl, 'OP_NO_SSLv3'):
-        # This version of Python is insecure!
+    # Pop off any positional arguments that just want defaults
+    args = list(args)
+    while args and args[-1] is None:
+        args.pop(-1)
+
+    kwargs = copy.copy(kwargs)
+    if (not hasattr(ssl, 'OP_NO_SSLv3')) and not context:
+        # This build/version of Python is insecure!
         # Force the protocol version to TLSv1.
         kwargs['ssl_version'] = kwargs.get('ssl_version', ssl.PROTOCOL_TLSv1)
-    # FIXME: This would unconditionally break all self-signed certs, which
-    #        makes it a no-go for many hobbiest e-mail servers.
-    #if 'cert_reqs' not in kwargs:
-    #    kwargs['cert_reqs'] = ssl.CERT_REQUIRED
-    return args, kwargs
+
+    # Per-site configuration, SNI and TOFU!
+    hostname = None
+    accept_certs = []
+    if 'server_hostname' in kwargs:
+        hostname = '%s:%s' % (kwargs['server_hostname'], sock.getpeername()[1])
+        tls_settings = KNOWN_TLS_HOSTS.get(md5_hex(hostname))
+
+        # These defaults allow us to do certificate TOFU
+        if tls_settings is not None:
+            accept_certs = [c for c in tls_settings.accept_certs]
+        kwargs['cert_reqs'] = ssl.CERT_NONE
+        if context:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+        # Attempt to configure for Certificate Authorities
+        use_web_ca = kwargs.get('use_web_ca',
+            tls_settings is None or tls_settings.use_web_ca)
+        if use_web_ca:
+            try:
+                if context:
+                    context.load_default_certs()
+                    context.verify_mode = ssl.CERT_REQUIRED
+                    context.check_hostname = True
+                    accept_certs = None
+                elif 'ca_certs' in kwargs:
+                    kwargs['cert_reqs'] = ssl.CERT_REQUIRED
+                    accept_certs = None
+                elif hasattr(ssl, 'get_default_verify_paths'):
+                    kwargs['cert_reqs'] = ssl.CERT_REQUIRED
+                    kwargs['ca_certs'] = ssl.get_default_verify_paths().cafile
+                    accept_certs = None
+                else:
+                    # Fall back to TOFU.
+                    pass
+            except (NameError, AttributeError):
+                # Old Python: Fall back to TOFU
+                pass
+
+        if context:
+            del kwargs['cert_reqs']
+        else:
+            # The context-less ssl.wrap_socket() doesn't understand this
+            # argument, so get rid of it.
+            del kwargs['server_hostname']
+
+    if 'use_web_ca' in kwargs:
+        del kwargs['use_web_ca']
+
+    return tuple(args), kwargs, hostname, accept_certs
+
+
+def tls_new_context():
+    if hasattr(ssl, 'OP_NO_SSLv3'):
+        return ssl.SSLContext(ssl.PROTOCOL_SSLv23)
+    else:
+        return ssl.SSLContext(ssl.PROTOCOL_TLSv1)
+
+
+def tls_cert_tofu(wrapped, accept_certs, sname):
+    global KNOWN_TLS_HOSTS
+    cert = tls_sock_cert_sha256(wrapped)
+    if accept_certs and cert not in accept_certs:
+        raise ssl.CertificateError('Unrecognized certificate: %s' % cert)
+
+    skey = md5_hex(sname)
+    if skey not in KNOWN_TLS_HOSTS:
+        KNOWN_TLS_HOSTS[skey] = {'server': sname}
+        KNOWN_TLS_HOSTS[skey].use_web_ca = (accept_certs is None)
+    if cert not in KNOWN_TLS_HOSTS[skey].accept_certs:
+        KNOWN_TLS_HOSTS[skey].accept_certs.append(cert)
 
 
 def tls_context_wrap_socket(org_wrap, context, sock, *args, **kwargs):
-    args, kwargs = tls_configure(context, args, kwargs)
-    return org_wrap(context, sock, *args, **kwargs)
+    args, kwargs, sname, accept_certs = tls_configure(sock, context, args, kwargs)
+    tofu = kwargs.get('tofu', True)
+    if 'tofu' in kwargs: del kwargs['tofu']
+    wrapped = org_wrap(context, sock, *args, **kwargs)
+    if tofu:
+        tls_cert_tofu(wrapped, accept_certs, sname)
+    return wrapped
 
 
-def tls_wrap_socket(org_wrap, *args, **kwargs):
-    args, kwargs = tls_configure(None, args, kwargs)
-    return org_wrap(*args, **kwargs)
+def tls_wrap_socket(org_wrap, sock, *args, **kwargs):
+    args, kwargs, sname, accept_certs = tls_configure(sock, None, args, kwargs)
+    tofu = kwargs.get('tofu', True)
+    if 'tofu' in kwargs: del kwargs['tofu']
+    wrapped = org_wrap(sock, *args, **kwargs)
+    if tofu:
+        tls_cert_tofu(wrapped, accept_certs, sname)
+    return wrapped
 
 
 ##[ Key Trust ]#############################################################
@@ -521,10 +631,17 @@ def evaluate_signature_key_trust(config, email, tree):
 ##[ Setup ]#################################################################
 
 if __name__ != "__main__":
-    ssl.wrap_socket = monkey_patch(ssl.wrap_socket, tls_wrap_socket)
     if hasattr(ssl, 'SSLContext'):
         ssl.SSLContext.wrap_socket = monkey_patch(
             ssl.SSLContext.wrap_socket, tls_context_wrap_socket)
+        def add_tls_context(unused_org_wrap, sock, *args, **kwargs):
+            try:
+                return tls_new_context().wrap_socket(sock, *args, **kwargs)
+            except:
+                raise
+        ssl.wrap_socket = monkey_patch(ssl.wrap_socket, add_tls_context)
+    else:
+        ssl.wrap_socket = monkey_patch(ssl.wrap_socket, tls_wrap_socket)
 
 
 ##[ Tests ]##################################################################

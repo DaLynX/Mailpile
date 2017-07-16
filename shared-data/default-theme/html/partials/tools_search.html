@@ -30,27 +30,27 @@
       <ul id="menu1" class="dropdown-menu dropdown-menu-right" role="menu" aria-labelledby="display-density">
         <li role="presentation">
           <a class="change-search-order' + oc.get('rev-freshness', '') + '"
-             data-order="rev-freshness"
+             data-order="rev-freshness" data-keep-selection=1
              href="' + ou['rev-freshness'] + '">' +  _("Freshness") + '</a>
         </li>
         <li role="presentation">
           <a class="change-search-order' + oc.get('rev-date', '') + '"
-             data-order="rev-date"
+             data-order="rev-date" data-keep-selection=1
              href="' + ou['rev-date'] + '">' + _("Newest First") + '</a>
         </li>
         <li role="presentation">
           <a class="change-search-order' + oc.get('date', '') + '"
-             data-order="date"
+             data-order="date" data-keep-selection=1
              href="' + ou['date'] + '">' + _("Oldest First") + '</a>
         </li>
         <li role="presentation">
           <a class="change-search-order' + oc.get('rev-flat-date', '') + '"
-             data-order="rev-flat-date"
+             data-order="rev-flat-date" data-keep-selection=1
              href="' + ou['rev-flat-date'] + '">' + _("Messages") + '</a>
         </li>
         <li role="presentation">
           <a class="change-search-order' + oc.get('rev-index', '') + '"
-             data-order="rev-index"
+             data-order="rev-index" data-keep-selection=1
              href="' + ou['rev-index'] + '">' + _("Unsorted") + '</a>
         </li>
       </ul>
@@ -58,7 +58,7 @@
 ') -%}
 {%- endif %}
 {%- do display_things.append('
-    <li class="dropdown">
+    <li class="dropdown" id="display-density-selector">
       <a class="dropdown-toggle" data-toggle="dropdown" href="#"><span class="navigation-icon icon-eye"></span> ' + _("Display") + '</a>
       <ul id="menu1" class="dropdown-menu dropdown-menu-right" role="menu" aria-labelledby="display-density">
         <li role="presentation">
@@ -90,7 +90,7 @@
 {%-         set msg = _("Move to %(tag_name)s", tag_name=tag.name) -%}
 {%-         set act = "move" -%}
 {%-       endif -%}
-{%-       set tag_color = theme_settings().colors[tag.label_color] -%}
+{%-       set tag_color = theme_settings().colors.get(tag.label_color, tag.label_color) -%}
 {%-       do search_actions.append('
   <li class="hide">
     <a class="bulk-action-tag-op" href="#" title="'+ msg +'"
@@ -101,12 +101,12 @@
 {%-     endif -%}
 {%-   endfor -%}
 
-{%-   do search_actions.append('
+{# FIXME, Issue #879  %-   do search_actions.append('
   <li class="hide">
     <a class="bulk-action-tag" href="#" title="' + _("Assign Tags") + '">
       <span class="icon icon-tags"></span>
     </a>
-  </li>') -%}
+  </li>') -% #}
 {%-   if "in:spam" not in result.search_terms %}
 {%-     do search_actions.append('
   <li class="hide">
@@ -125,13 +125,15 @@
     </a>
   </li>') -%}
 {%-   endif %}
-{%-   do search_actions.append('
+{%-   if result.tag_capabilities.allow_del -%}
+{%-     do search_actions.append('
   <li class="hide">
     <a class="bulk-action-tag-op" href="#" title="' + _("Untag Selection") + '"
        data-op="untag">
       <span class="icon icon-circle-x"></span>
     </a>
   </li>') -%}
+{%-   endif %}
 {%-   do search_actions.append('
   <li class="hide">
     <a class="bulk-action-tag-op" href="#" data-op="archive"

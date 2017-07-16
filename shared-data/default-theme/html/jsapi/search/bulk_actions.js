@@ -3,7 +3,7 @@ Mailpile.bulk_actions_update_ui = function() {
     var $context = $(context);
     var selected = Mailpile.UI.Selection.selected($context);
     var checkboxes = $context.find('.pile-results input[type=checkbox]');
-    
+
     // This is a hack to make sure the length check below fails
     if (checkboxes.length == 0) checkboxes = ['fake', 'fake'];
 
@@ -19,6 +19,8 @@ Mailpile.bulk_actions_update_ui = function() {
     else {
       $context.find('#pile-select-all-action').prop('checked', false);
     }
+
+    Mailpile.update_selection_classes($context.find('td.checkbox'));
 
     if (selected.length > 0) {
       var message = ('<span id="bulk-actions-selected-count">' +
@@ -44,11 +46,11 @@ Mailpile.bulk_actions_update_ui = function() {
 
       var have_tags = {};
       for (var i = 0; i < selected.length; i++) {
-        var tids = $context.find('.pile-message-' + selected[i])
-                           .data('tids').split(/,/);
+        var search = '.pile-message-' + selected[i];
+        if (selected[i] == "!all") search = '.pile-message';
+        var tids = $context.find(search).data('tids').split(/,/);
         for (var j = 0; j < tids.length; j++) have_tags[tids[j]] = true;
       }
-      console.log(JSON.stringify(have_tags));
 
       Mailpile.show_bulk_actions($context.find('.bulk-actions').find('li'),
                                  have_tags);
@@ -87,6 +89,7 @@ Mailpile.show_message_hints = function($context, selected) {
 
 
 Mailpile.select_all_matches = function(elem) {
+  if (!elem) elem = '.pile-results a';
   $(elem).closest('.selection-context')
          .find('#pile-select-all-action').val('!all');
   Mailpile.bulk_actions_update_ui();
@@ -95,6 +98,7 @@ Mailpile.select_all_matches = function(elem) {
 
 
 Mailpile.unselect_all_matches = function(elem) {
+  if (!elem) elem = '.pile-results a';
   $(elem).closest('.selection-context')
          .find('#pile-select-all-action').val('');
   Mailpile.bulk_actions_update_ui();
@@ -102,23 +106,23 @@ Mailpile.unselect_all_matches = function(elem) {
 };
 
 
-Mailpile.bulk_action_read = function(elem) {
+Mailpile.bulk_action_read = function(elem, callback) {
   var $context = Mailpile.UI.Selection.context(elem || '.pile-results');
   Mailpile.UI.Tagging.tag_and_update_ui({
     del: 'new',
     mid: Mailpile.UI.Selection.selected($context),
     context: $context.find('.search-context').data('context')
-  }, 'read');
+  }, 'read', callback);
 };
 
 
-Mailpile.bulk_action_unread = function(elem) {
+Mailpile.bulk_action_unread = function(elem, callback) {
   var $context = Mailpile.UI.Selection.context(elem || '.pile-results');
   Mailpile.UI.Tagging.tag_and_update_ui({
     add: 'new',
     mid: Mailpile.UI.Selection.selected($context),
     context: $context.find('.search-context').data('context')
-  }, 'unread');
+  }, 'unread', callback);
 };
 
 
@@ -139,20 +143,6 @@ Mailpile.bulk_action_deselect_target = function() {
   this.bulk_actions_update_ui();
   return true;
 };
-
-
-Mailpile.bulk_action_toggle_target = function() {
-  var target = this.search_target;
-  var $tr = $('.pile-message').eq((target === 'none') ? 0 : target);
-  if ($tr.find('input[type=checkbox]').is(':checked')) {
-    Mailpile.pile_action_unselect($tr);
-  }
-  else {
-    Mailpile.pile_action_select($tr);
-  }
-  return true;
-};
-
 
 Mailpile.bulk_action_select_all = function() {
   var checkboxes = $('.pile-results input[type=checkbox]');
@@ -186,55 +176,64 @@ Mailpile.bulk_action_select_invert = function() {
   Mailpile.bulk_actions_update_ui();
 };
 
-
-Mailpile.bulk_action_select_between = function() {
-  alert('FIXME: Will select messages between two points');
-};
-
-
-Mailpile.bulk_action_selection_up = function() {
+Mailpile.bulk_action_move_selection = function(keep, mover) {
   var checkboxes = $('.pile-results input[type=checkbox]');
   var selected = Mailpile.UI.Selection.selected(checkboxes.eq(0));
   if (selected.length == 0) {
-    Mailpile.pile_action_select($(checkboxes[checkboxes.length-1]).parent().parent());
-    return;
+    var $elem = $(checkboxes[0]).parent().parent();
+    Mailpile.pile_action_select($elem);
+    return $elem;
   }
+
+  var $last = [];
   $.each(checkboxes, function() {
-    if ($(this).parent().parent().next().children().children("input").is(":checked")) {
-      Mailpile.pile_action_select($(this).parent().parent(), 'partial');
-    } else {
-      Mailpile.pile_action_unselect($(this).parent().parent(), 'partial');
-    }
+    var $e = $(this);
+    if ($e.is(":checked")) $last = $e.parent().parent();
   });
-  Mailpile.bulk_actions_update_ui();
-};
-
-
-Mailpile.bulk_action_selection_down = function() {
-  var checkboxes = $('.pile-results input[type=checkbox]');
-  var selected = Mailpile.UI.Selection.selected(checkboxes.eq(0));
-  if (selected.length == 0) {
-    Mailpile.pile_action_select($(checkboxes[0]).parent().parent());
-    return;
+  if ($last.length > 0) {
+    var $next = $(mover($last));
+    if (keep !== 'keep') Mailpile.pile_action_unselect($last);
+    if ($next) Mailpile.pile_action_select($next);
+    Mailpile.bulk_actions_update_ui();
+    return $next;
   }
-  $(checkboxes.get().reverse()).each(function() {
-    if ($(this).parent().parent().prev().children().children("input").is(":checked")) {
-      Mailpile.pile_action_select($(this).parent().parent());
-    } else {
-      Mailpile.pile_action_unselect($(this).parent().parent());
-    }
+  return $last;
+};
+
+Mailpile.bulk_action_selection_up = function(keep) {
+  return Mailpile.bulk_action_move_selection(keep, function($elem) {
+    return $elem.prev();
   });
 };
 
+Mailpile.bulk_action_selection_down = function(keep) {
+  return Mailpile.bulk_action_move_selection(keep, function($elem) {
+    return $elem.next();
+  });
+};
 
-Mailpile.open_selected_thread = function() {
+Mailpile.open_or_close_selected_thread = function() {
   var selected = Mailpile.UI.Selection.selected('.pile-results');
-  if (Mailpile.search_target !== 'none') {
-    var target = this['search_target'];
-    $('.pile-results tr').eq(target).find('.subject a').eq(0).trigger('click');
+  var msg = [];
+  if (selected.length === 1 && selected[0] == '!all') {
+    msg = $(".pile-results .pile-message");
   }
-  else if (selected.length === 1 && selected[0] != '!all') {
-    $(".pile-results .pile-message-" + selected[0]).eq(0)
-      .find('.subject a').eq(0).trigger('click');
+  else {
+    if (selected.length < 1) {
+      Mailpile.pile_action_select($('.pile-results .pile-message').eq(0));
+      selected = Mailpile.UI.Selection.selected('.pile-results');
+    }
+    if ((selected.length > 0) && (selected[0] != '!all')) {
+      msg = $(".pile-results .pile-message-" + selected[selected.length - 1]);
+    }
+  }
+  if (msg.length) {
+    var $close = msg.eq(0).find('#close-message');
+    if ($close.length == 0) {
+      msg.eq(0).find(".subject a").trigger('click');
+    }
+    else {
+      $('#close-message').trigger('click');
+    }
   }
 };

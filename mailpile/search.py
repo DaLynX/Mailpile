@@ -168,9 +168,10 @@ class MailIndex(BaseIndex):
                                              'block of index ending at %d'
                                              % offset)
                     # FIXME: Differentiate between partial index and no index?
+                    gpgi = GnuPG(self.config, event=GetThreadEvent())
                     decrypt_and_parse_lines(fd, process_lines, self.config,
-                                            newlines=True, decode=False,
-                                            _raise=False, error_cb=warn)
+                        newlines=True, decode=False, gpgi=gpgi,
+                        _raise=False, error_cb=warn)
         except IOError:
             if session:
                 session.ui.warning(_('Metadata index not found: %s'
@@ -210,18 +211,19 @@ class MailIndex(BaseIndex):
         tokeys = ([gpgr]
                   if gpgr not in (None, '', '!CREATE', '!PASSWORD')
                   else None)
-        if tokeys:
-            stat, edata = GnuPG(self.config, event=GetThreadEvent()
-                                ).encrypt(data, tokeys=tokeys)
-            if stat == 0:
-                return edata
 
-        elif self.config.master_key:
+        if self.config.master_key:
             with EncryptingStreamer(self.config.master_key,
                                     delimited=True) as es:
                 es.write(data)
                 es.finish()
                 return es.save(None)
+
+        elif tokeys:
+            stat, edata = GnuPG(self.config, event=GetThreadEvent()
+                                ).encrypt(data, tokeys=tokeys)
+            if stat == 0:
+                return edata
 
         return data
 
@@ -343,19 +345,13 @@ class MailIndex(BaseIndex):
 
         msg_info = self.get_msg_at_idx_pos(msg_idx_pos)
         msg_ptrs = msg_info[self.MSG_PTRS].split(',')
-        self.PTRS[msg_ptr] = msg_idx_pos
 
-        # If message was seen in this mailbox before, update the location
-        for i in range(0, len(msg_ptrs)):
-            if msg_ptrs[i][:MBX_ID_LEN] == msg_ptr[:MBX_ID_LEN]:
-                msg_ptrs[i] = msg_ptr
-                msg_ptr = None
-                break
-        # Otherwise, this is a new mailbox, record this sighting as well!
+        # New location! Some other process will prune obsolete pointers.
         if msg_ptr:
+            self.PTRS[msg_ptr] = msg_idx_pos
             msg_ptrs.append(msg_ptr)
 
-        msg_info[self.MSG_PTRS] = ','.join(msg_ptrs)
+        msg_info[self.MSG_PTRS] = ','.join(list(set(msg_ptrs)))
         self.set_msg_at_idx_pos(msg_idx_pos, msg_info)
         return msg_info
 
@@ -433,6 +429,7 @@ class MailIndex(BaseIndex):
         existing_ptrs = set()
         messages = sorted(mbox.keys())
         messages_md5 = md5_hex(str(messages))
+        mbox_version = mbox.last_updated()
         if messages_md5 == self._scanned.get(mailbox_idx, ''):
             return finito(0, _('%s: No new mail in: %s'
                                ) % (mailbox_idx, mailbox_fn),
@@ -475,6 +472,9 @@ class MailIndex(BaseIndex):
                 messages_md5 = not_done_yet
                 break
             elif deadline and time.time() > start_time + deadline:
+                messages_md5 = not_done_yet
+                break
+            elif mbox_version != mbox.last_updated():
                 messages_md5 = not_done_yet
                 break
 
@@ -579,8 +579,8 @@ class MailIndex(BaseIndex):
                 msg_metadata_kws = mbox.get_metadata_keywords(msg_mbox_idx)
 
             msg = ParseMessage(msg_fd,
-                               pgpmime=session.config.prefs.index_encrypted,
-                               config=session.config)
+                pgpmime=(session.config.prefs.index_encrypted and 'all'),
+                config=session.config)
             if not lazy:
                 msg_bytes = msg_fd.tell()
 
@@ -736,8 +736,9 @@ class MailIndex(BaseIndex):
 
     def index_email(self, session, email):
         # Extract info from the email object...
-        msg = email.get_msg(pgpmime=session.config.prefs.index_encrypted,
-                            crypto_state_feedback=False)
+        msg = email.get_msg(
+            pgpmime=(session.config.prefs.index_encrypted and 'all'),
+            crypto_state_feedback=False)
         msg_mid = email.msg_mid()
         msg_info = email.get_msg_info()
         msg_size = email.get_msg_size()
@@ -1174,7 +1175,7 @@ class MailIndex(BaseIndex):
         if 'crypto:has' in keywords:
             e = Email(self, -1,
                       msg_parsed=msg,
-                      msg_parsed_pgpmime=msg,
+                      msg_parsed_pgpmime=('all', msg),
                       msg_info=self.BOGUS_METADATA[:])
             tree = e.get_message_tree(want=(e.WANT_MSG_TREE_PGP +
                                             ('text_parts', )))
@@ -1372,6 +1373,9 @@ class MailIndex(BaseIndex):
         # Remove all tags
         for tag in self.get_tags(msg_info=info):
             self.remove_tag(session, tag, msg_idxs=[msg_idx])
+
+        # Record that these messages were deleted
+        GlobalPostingList.Append(session, 'deleted:is', [b36(msg_idx)])
 
     def update_msg_sorting(self, msg_idx, msg_info):
         for order, sorter in self.SORT_ORDERS.iteritems():
@@ -1583,7 +1587,7 @@ class MailIndex(BaseIndex):
                 results.extend(self.search(session, [tag.magic_terms],
                                            recursion=recursion+1).as_set())
         results.extend(hits('%s:in' % tag_id))
-        return results
+        return results, tag
 
     def search(self, session, searchterms,
                keywords=None, order=None, recursion=0, context=None):
@@ -1602,8 +1606,14 @@ class MailIndex(BaseIndex):
                     return self.TAGS.get(term.rsplit(':', 1)[0], [])
                 else:
                     session.ui.mark(_('Searching for %s') % term)
-                    return [int(h, 36) for h
-                            in GlobalPostingList(session, term).hits()]
+                    gpl_hits = GlobalPostingList(session, term).hits()
+                    try:
+                        return [int(h, 36) for h in gpl_hits]
+                    except ValueError:
+                        b36re = re.compile('^[a-zA-Z0-9]{1,8}$')
+                        print 'FIXME! BAD HITS: %s => %s' % (term, [
+                            h for h in gpl_hits if not b36re.match(h)])
+                        return [int(h, 36) for h in gpl_hits if b36re.match(h)]
 
         # Replace some GMail-compatible terms with what we really use
         if 'tags' in self.config:
@@ -1627,6 +1637,10 @@ class MailIndex(BaseIndex):
         else:
             r = []
 
+        searched_invisible = False
+        searched_mailbox = False
+        searched_deleted = False
+
         for term in searchterms:
             if term in STOPLIST:
                 if session:
@@ -1645,8 +1659,15 @@ class MailIndex(BaseIndex):
 
             if ':' in term:
                 if term.startswith('in:'):
-                    rt.extend(self.search_tag(session, term, hits,
-                                              recursion=recursion))
+                    results, tag = self.search_tag(session, term, hits,
+                                                   recursion=recursion)
+                    rt.extend(results)
+                    if tag:
+                        if tag.flag_hides:
+                            searched_invisible = True
+                        if tag.type == 'mailbox':
+                            searched_mailbox = True
+
                 elif term.startswith('mid:'):
                     rt.extend([int(t, 36) for t in
                                term[4:].replace('=', '').split(',')])
@@ -1667,17 +1688,19 @@ class MailIndex(BaseIndex):
                     for status in EncryptionInfo.STATUSES:
                         if status in CryptoInfo.STATUSES:
                             continue
-                        rt.extend(self.search_tag(session,
-                                                  'in:mp_enc-%s' % status,
-                                                  hits, recursion=recursion))
+                        rt.extend(self.search_tag(
+                            session, 'in:mp_enc-%s' % status, hits,
+                            recursion=recursion)[0])
                 elif term == 'is:signed':
                     for status in SignatureInfo.STATUSES:
                         if status in CryptoInfo.STATUSES:
                             continue
-                        rt.extend(self.search_tag(session,
-                                                  'in:mp_sig-%s' % status,
-                                                  hits, recursion=recursion))
+                        rt.extend(self.search_tag(
+                            session, 'in:mp_sig-%s' % status, hits,
+                            recursion=recursion)[0])
                 else:
+                    if term == 'is:deleted':
+                        searched_deleted = True
                     t = term.split(':', 1)
                     fnc = _plugins.get_search_term(t[0])
                     if fnc:
@@ -1707,17 +1730,14 @@ class MailIndex(BaseIndex):
         exclude = []
         order = order or (session and session.order) or 'flat-index'
         if (results and (keywords is None) and
+                (not searched_invisible) and
+                (not searched_mailbox) and
+                (not searched_deleted) and
                 ('tags' in self.config) and
                 (not session or 'all' not in order)):
             invisible = self.config.get_tags(flag_hides=True)
-            exclude_terms = ['in:%s' % i._key for i in invisible]
-            for tag in invisible:
-                tid = tag._key
-                for p in ('in:%s', '+in:%s', '-in:%s'):
-                    if ((p % tid) in searchterms or
-                            (p % tag.name) in searchterms or
-                            (p % tag.slug) in searchterms):
-                        exclude_terms = []
+            exclude_terms = (['is:deleted'] +
+                             ['in:%s' % i._key for i in invisible])
             if len(exclude_terms) > 1:
                 exclude_terms = ([exclude_terms[0]] +
                                  ['+%s' % e for e in exclude_terms[1:]])

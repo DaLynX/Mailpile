@@ -24,7 +24,7 @@ __all__ = [
     'core',
     'eventlog', 'search', 'tags', 'contacts', 'compose', 'groups',
     'dates', 'sizes', 'autotag', 'cryptostate', 'crypto_gnupg',
-    'setup_magic', 'exporters', 'plugins', 'motd',
+    'setup_magic', 'oauth', 'exporters', 'plugins', 'motd',
     'vcard_carddav', 'vcard_gnupg', 'vcard_gravatar', 'vcard_libravatar',
     'vcard_mork', 'html_magic', 'migrate', 'smtp_server', 'crypto_policy',
     'keylookup'
@@ -36,6 +36,20 @@ class EmailTransform(object):
     """Base class for e-mail transforms"""
     def __init__(self, config):
         self.config = config
+
+    def _get_sender_profile(self, sender, kwargs):
+        profile = kwargs.get('sender_profile')
+        if not profile:
+            profile = self.config.get_profile(sender)
+        return profile
+
+    def _get_first_part(self, msg, mimetype):
+        for part in msg.walk():
+             if not part.is_multipart():
+                 mimetype = (part.get_content_type() or 'text/plain').lower()
+                 if mimetype == 'text/plain':
+                     return part
+        return None
 
     def TransformIncoming(self, *args, **kwargs):
         return list(args[:]) + [False]
@@ -63,12 +77,12 @@ class PluginManager(object):
     REQUIRED = [
         'core',
         'eventlog', 'search', 'tags', 'contacts', 'compose', 'groups',
-        'dates', 'sizes', 'cryptostate', 'setup_magic', 'html_magic',
+        'dates', 'sizes', 'cryptostate', 'setup_magic', 'oauth', 'html_magic',
         'plugins', 'keylookup', 'motd'
     ]
     # Plugins we want, if they are discovered
     WANTED = [
-        'autoajax', 'print', 'datadig'
+        'autoajax', 'print', 'datadig', 'hints'
     ]
     # Plugins that have been renamed from past releases
     RENAMED = {

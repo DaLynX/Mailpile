@@ -6,8 +6,11 @@ Mailpile.Search.Tooltips = {};
 Mailpile.Search.init = function() {
 
   // Drag Items
-  Mailpile.UI.Search.Draggable('td.draggable');
-  Mailpile.UI.Search.Dropable('.pile-results tr', 'a.sidebar-tag');
+  var index_capabilities = $('.pile-results').data('index-capabilities');
+  if (index_capabilities.indexOf('has_tags') >= 0) {
+    Mailpile.UI.Search.Draggable('td.draggable');
+    Mailpile.UI.Search.Dropable('.pile-results tr', 'a.sidebar-tag');
+  };
 
   // Render Display Size
   if (!Mailpile.local_storage['view_size']) {
@@ -23,8 +26,21 @@ Mailpile.Search.init = function() {
     }
   });
 
+  // Navigation highlights
+  $.each($('.display-refiner'), function() {
+    if (document.location.href.endsWith($(this).find('a').attr('href'))) {
+      $(this).addClass('navigation-on');
+    }
+    else {
+      $(this).removeClass('navigation-on');
+    };
+  });
+
   // Tooltips
   Mailpile.Search.Tooltips.MessageTags();
+
+  // Focus on the first message
+  $('.pile-results .pile-message .subject a').eq(0).focus();
 
   EventLog.subscribe(".mail_source", function(ev) {
     // bre: re-enabling this just for fun and to test the event subscription

@@ -1,6 +1,6 @@
 APPVER = "1.0.0rc0"
 ABOUT = """\
-Mailpile.py              a tool             Copyright 2013-2016, Mailpile ehf
+Mailpile.py              a tool             Copyright 2013-2017, Mailpile ehf
  v%8.0008s         for searching and               <https://www.mailpile.is/>
                organizing piles of e-mail
 
@@ -109,6 +109,7 @@ CONFIG_RULES = {
         'crypto_policy':  X(_('Default encryption policy for outgoing mail'),
                             str, 'none'),
         'inline_pgp':      (_('Use inline PGP when possible'), bool,     True),
+        'encrypt_subject': (_('Encrypt subjects by default'), bool,      True),
         'default_order':   (_('Default sort order'), str,     'rev-freshness'),
         'obfuscate_index':X(_('Key to use to scramble the index'), str,    ''),
         'index_encrypted':X(_('Make encrypted content searchable'),
@@ -118,6 +119,8 @@ CONFIG_RULES = {
         'encrypt_vcards': X(_('Encrypt the contact database'), bool,     True),
         'encrypt_events': X(_('Encrypt the event log'), bool,            True),
         'encrypt_misc':   X(_('Encrypt misc. local data'), bool,         True),
+        'allow_deletion': X(_('Allow permanent deletion of e-mails'),
+                                                                  bool, False),
         'rescan_command':  (_('Command run before rescanning'), str,       ''),
         'default_email':   (_('Default outgoing e-mail address'), 'email', ''),
         'default_route':   (_('Default outgoing mail route'), str, ''),
@@ -153,6 +156,11 @@ CONFIG_RULES = {
         'policy':          (_('Security policy'),
                             ["store", "cache-only", "fail", "protect"],
                             'store')
+    }, {}],
+    'tls': [_('Settings for TLS certificate validation'), {
+        'server':          (_('Server hostname:port'), str, ''),
+        'accept_certs':    (_('SHA256 of acceptable certs'), str, []),
+        'use_web_ca':      (_('Use web certificate authorities'), bool, True)
     }, {}],
     'routes': [_('Outgoing message routes'), {
         'name':            (_('Route name'), str, ''),

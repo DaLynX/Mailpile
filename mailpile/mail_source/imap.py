@@ -43,7 +43,9 @@ import imaplib
 import os
 import re
 import socket
+import ssl
 import traceback
+import time
 from imaplib import IMAP4_SSL, CRLF
 from mailbox import Mailbox, Message
 from urllib import quote, unquote
@@ -54,6 +56,7 @@ except ImportError:
     import StringIO
 
 import mailpile.mail_source.imap_utf7
+from mailpile.auth import IndirectPassword
 from mailpile.conn_brokers import Master as ConnBroker
 from mailpile.eventlog import Event
 from mailpile.i18n import gettext as _
@@ -62,6 +65,7 @@ from mailpile.index.mailboxes import MailboxIndex
 from mailpile.mail_source import BaseMailSource
 from mailpile.mail_source.imap_starttls import IMAP4
 from mailpile.mailutils import FormatMbxId, MBX_ID_LEN
+from mailpile.plugins.oauth import OAuth2
 from mailpile.util import *
 from mailpile.vfs import FilePath
 
@@ -162,7 +166,8 @@ class SharedImapConn(threading.Thread):
         self._idling = False
         self._selected = None
 
-        for meth in ('append', 'add', 'capability', 'fetch', 'noop',
+        for meth in ('append', 'add', 'authenticate', 'capability', 'fetch',
+                     'noop', 'store', 'expunge', 'close',
                      'list', 'login', 'logout', 'namespace', 'search', 'uid'):
             self.__setattr__(meth, self._mk_proxy(meth))
 
@@ -228,13 +233,15 @@ class SharedImapConn(threading.Thread):
             self.name += ' (closed)'
         return self._conn.close()
 
-    def select(self, mailbox='INBOX', readonly=True):
+    def select(self, mailbox='INBOX', readonly=False):
         # This routine caches the SELECT operations, because we will be
         # making lots and lots of superfluous ones "just in case" as part
         # of multiplexing one IMAP connection for multiple mailboxes.
         assert(self._lock.locked())
         if self._selected and self._selected[0] == (mailbox, readonly):
             return self._selected[1]
+        elif self._selected:
+            self._conn.close()
         rv = self._conn.select(mailbox='"%s"' % mailbox, readonly=readonly)
         if rv[0].upper() == 'OK':
             info = dict(self._conn.response(f) for f in
@@ -312,7 +319,9 @@ class SharedImapConn(threading.Thread):
     def quit(self):
         with self._lock:
             try:
-                if self._conn:
+                if self._conn and self._selected:
+                    self._conn.close()
+                if self._conn and self._conn.file:
                     self.logout()
             except (IOError, IMAP4.error):
                 pass
@@ -365,8 +374,10 @@ class SharedImapMailbox(Mailbox):
         self.editable = False  # FIXME: this is technically not true
         self.path = mailbox_path
         self.conn_cls = conn_cls
+        self._last_updated = None
         self._index = None
         self._factory = None  # Unused, for Mailbox compatibility
+        self._broken = None
 
     def open_imap(self):
         return self.source.open(throw=IMAP_IOError, conn_cls=self.conn_cls)
@@ -374,36 +385,53 @@ class SharedImapMailbox(Mailbox):
     def timed_imap(self, *args, **kwargs):
         return self.source.timed_imap(*args, **kwargs)
 
+    def last_updated(self):
+        return self._last_updated
+
     def _assert(self, test, error):
         if not test:
             raise IMAP_IOError(error)
 
     def __nonzero__(self):
+        if self._broken is not None:
+            return not self._broken
         try:
             with self.open_imap() as imap:
                 ok, data = self.timed_imap(imap.noop, mailbox=self.path)
-                return ok
+                self._broken = False
         except (IOError, AttributeError):
-            return False
+            self._broken = True
+        return not self._broken
 
     def add(self, message):
         raise Exception('FIXME: Need to RETURN AN ID.')
+        self._broken = None
         with self.open_imap() as imap:
             ok, data = self.timed_imap(imap.append, self.path, message=message)
+            self._last_updated = time.time()
             self._assert(ok, _('Failed to add message'))
+        self._broken = False
 
     def remove(self, key):
+        self._broken = None
         with self.open_imap() as imap:
-            ok, data = self.timed_imap(imap.store, '+FLAGS', r'\Deleted',
+            uidv, uid = (int(k, 36) for k in key.split('.'))
+            ok, data = self.timed_imap(imap.uid, 'STORE', uid,
+                                       '+FLAGS', '(\Deleted)',
                                        mailbox=self.path)
+            self._last_updated = time.time()
             self._assert(ok, _('Failed to remove message'))
+        self._broken = False
 
     def mailbox_info(self, k, default=None):
+        self._broken = None
         with self.open_imap() as imap:
             imap.select(self.path)
             return imap.mailbox_info(k, default=default)
+        self._broken = False
 
     def get_info(self, key):
+        self._broken = None
         with self.open_imap() as imap:
             uidv, uid = (int(k, 36) for k in key.split('.'))
             ok, data = self.timed_imap(imap.uid, 'FETCH', uid,
@@ -420,6 +448,7 @@ class SharedImapMailbox(Mailbox):
             info = dict(zip(*[iter(data[1])]*2))
             info['UIDVALIDITY'] = uidv
             info['UID'] = uid
+        self._broken = False
         return info
 
     def get(self, key, _bytes=None):
@@ -474,19 +503,21 @@ class SharedImapMailbox(Mailbox):
         return StringIO.StringIO(payload)
 
     def iterkeys(self):
+        self._broken = None
         with self.open_imap() as imap:
             ok, data = self.timed_imap(imap.uid, 'SEARCH', None, 'ALL',
                                        mailbox=self.path)
             self._assert(ok, _('Failed to list mailbox contents'))
             validity = imap.mailbox_info('UIDVALIDITY', ['0'])[0]
-            return ('%s.%s' % (b36(int(validity)), b36(int(k)))
-                    for k in sorted(data))
+        self._broken = False
+        return ('%s.%s' % (b36(int(validity)), b36(int(k)))
+                for k in sorted(data))
 
     def keys(self):
         return list(self.iterkeys())
 
     def update_toc(self):
-        pass
+        self._last_updated = time.time()
 
     def get_msg_ptr(self, mboxid, key):
         return '%s%s' % (mboxid, quote(key))
@@ -518,9 +549,11 @@ class SharedImapMailbox(Mailbox):
             return False
 
     def __len__(self):
+        self._broken = None
         with self.open_imap() as imap:
             ok, data = self.timed_imap(imap.noop, mailbox=self.path)
             return imap.mailbox_info('EXISTS', ['0'])[0]
+        self._broken = False
 
     def flush(self):
         pass
@@ -543,9 +576,22 @@ class SharedImapMailbox(Mailbox):
             self._index = ImapMailboxIndex(config, self, mbx_mid=mbx_mid)
         return self._index
 
+    def __unicode__(self):
+        if self:
+            return _("IMAP: %s") % self.path
+        else:
+            return _("IMAP: %s (not logged in)") % self.path
+
+    def describe_msg_by_ptr(self, msg_ptr):
+        if self:
+            return _("e-mail with ID %s") % unquote(msg_ptr[MBX_ID_LEN:])
+        else:
+            return _("remote mailbox is inavailable")
+
 
 def _connect_imap(session, settings, event,
-                  conn_cls=None, timeout=30, throw=False, logged_in_cb=None):
+                  conn_cls=None, timeout=30, throw=False,
+                  logged_in_cb=None, source=None):
 
     def timed(*args, **kwargs):
         return RunTimed(timeout, *args, **kwargs)
@@ -597,22 +643,54 @@ def _connect_imap(session, settings, event,
                     # Fetch capabilities again after STARTTLS
                     ok, data = timed_imap(conn.capability)
                     capabilities = set(' '.join(data).upper().split())
+                    # Update the protocol to avoid getting downgraded later
+                    if settings.get('protocol', '') != 'imap_ssl':
+                        settings['protocol'] = 'imap_tls'
             except (IMAP4.error, IOError, socket.error):
                 ok = False
             if not ok:
-                ev['error'] = ['protocol', _('Failed to STARTTLS')]
+                ev['error'] = [
+                    'tls',
+                    _('Failed to make a secure TLS connection'),
+                    '%s:%s' % (settings.get('host'), settings.get('port'))]
                 if throw:
                     raise throw(ev['error'][1])
                 return WithaBool(False)
 
+        username = password = ""
         try:
+            error_type = 'auth'
+            error_msg = _('Invalid username or password')
             username = settings.get('username', '').encode('utf-8')
-            password = settings.get('password', '').encode('utf-8')
-            ok, data = timed_imap(conn.login, username, password)
-        except (IMAP4.error, UnicodeDecodeError):
-            ok = False
+            password = IndirectPassword(
+                session.config,
+                settings.get('password', '')
+                ).encode('utf-8')
+
+            if (settings.get('auth_type', '').lower() == 'oauth2'
+                    and 'AUTH=XOAUTH2' in capabilities):
+                error_type = 'oauth2'
+                error_msg = _('Access denied by mail server')
+                token_info = OAuth2.GetFreshTokenInfo(session, username)
+                if not (username and token_info and token_info.access_token):
+                    raise ValueError("Missing configuration")
+                ok, data = timed_imap(
+                    conn.authenticate, 'XOAUTH2',
+                    lambda challenge: OAuth2.XOAuth2Response(username,
+                                                             token_info))
+                if not ok:
+                    token_info.access_token = ''
+
+            else:
+                ok, data = timed_imap(conn.login, username, password)
+
+        except (IMAP4.error, UnicodeDecodeError, ValueError):
+            ok, data = False, None
         if not ok:
-            ev['error'] = ['auth', _('Invalid username or password')]
+            auth_summary = ''
+            if source is not None:
+                auth_summary = source._summarize_auth()
+            ev['error'] = [error_type, error_msg, username, auth_summary]
             if throw:
                 raise throw(ev['error'][1])
             return WithaBool(False)
@@ -626,6 +704,11 @@ def _connect_imap(session, settings, event,
         if 'imap' in session.config.sys.debug:
             session.ui.debug(traceback.format_exc())
         ev['error'] = ['timeout', _('Connection timed out')]
+    except (ssl.CertificateError, ssl.SSLError):
+        if 'imap' in session.config.sys.debug:
+            session.ui.debug(traceback.format_exc())
+        ev['error'] = ['tls', _('Failed to make a secure TLS connection'),
+                       '%s:%s' % (settings.get('host'), settings.get('port'))]
     except (IMAP_IOError, IMAP4.error):
         if 'imap' in session.config.sys.debug:
             session.ui.debug(traceback.format_exc())
@@ -837,7 +920,8 @@ class ImapMailSource(BaseMailSource):
                              conn_cls=conn_cls,
                              timeout=self.timeout,
                              throw=throw,
-                             logged_in_cb=logged_in_cb)
+                             logged_in_cb=logged_in_cb,
+                             source=self)
         if conn:
             return self.conn
         else:

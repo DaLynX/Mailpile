@@ -145,9 +145,12 @@ Mailpile.Composer.SendMessage = function(send_btn) {
       else if (action === 'reply' && response.status === 'success') {
         Mailpile.Composer.Complete(response.result.thread_ids[0]);
       }
-      else if (response.status === 'error' && response.error.locked_keys) {
+      else if (response.status === 'error' &&
+               response.password_needed &&
+               response.password_needed[0].id) {
         Mailpile.auto_modal({
-          url: '{{ U("/settings/set/password/?id=") }}' + response.error.locked_keys[0],
+          url: ('{{ U("/settings/set/password/keys.html?is_locked=yes&id=") }}'
+                + response.password_needed[0].id),
           header: 'off',
           callback: function(result) {
             // Let's try that again!
@@ -252,6 +255,7 @@ $(document).on('click', '.compose-message-trash', function() {
 $(document).on('click', '.compose-from', function(e) {
   e.preventDefault();
   var mid = $(this).data('mid');
+  var sig = $(this).data('sig');
   var avatar = $(this).find('.avatar img').attr('src');
   var name = $(this).find('.name').html();
   var address = $(this).find('.address').html();
@@ -260,6 +264,13 @@ $(document).on('click', '.compose-from', function(e) {
   $('#compose-from-selected-' + mid).find('.address').html(address);
   $('#compose-from-' + mid).val(name + ' <' + address + '>');
   $('#compose-send-' + mid).show();
+  if (sig) {
+    $('#compose-signature-' + mid).html(
+      '-- <br>' + sig.replace(/\n/g, '<br>') + '<br><br>');
+  }
+  else {
+    $('#compose-signature-' + mid).html('');
+  }
   Mailpile.Composer.Crypto.UpdateEncryptionState(mid, function() {});
 });
 
@@ -301,7 +312,7 @@ $(document).on('submit', '#form-compose-quoted-reply', function(e) {
   }
   Mailpile.API.settings_set_post({ 'web.quoted_reply': quoted_reply }, function(result) {
     Mailpile.notification(result);
-    $('#modal-full').modal('hide');
+    Mailpile.UI.hide_modal();
   });
 });
 

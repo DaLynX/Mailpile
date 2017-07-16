@@ -1,12 +1,13 @@
 import os
 import random
 import time
+from email import encoders
 
 import mailpile.config.defaults
 import mailpile.security as security
 from mailpile.crypto.gpgi import GnuPG
 from mailpile.crypto.gpgi import GnuPGBaseKeyGenerator, GnuPGKeyGenerator
-from mailpile.plugins import PluginManager
+from mailpile.plugins import EmailTransform, PluginManager
 from mailpile.commands import Command, Action
 from mailpile.eventlog import Event
 from mailpile.i18n import gettext as _
@@ -470,6 +471,9 @@ class ListVCards(VCardCommand):
     }
     HTTP_CALLABLE = ('GET')
 
+    def _augment_info(self, info):
+        return info
+
     def command(self):
         session, config = self.session, self.session.config
         kinds = self.KIND and [self.KIND] or None
@@ -507,9 +511,7 @@ class ListVCards(VCardCommand):
         vcards = config.vcards.find_vcards(terms, kinds=kinds)
         total = len(vcards)
         vcards = vcards[offset:offset + count]
-        return self._success(_("Listed %d/%d results") % (min(total, count),
-                                                          total),
-                             result=self._vcard_list(vcards, mode=fmt, info={
+        info = self._augment_list_info({
                    'terms': args,
                    'offset': offset,
                    'count': min(count, total),
@@ -517,8 +519,10 @@ class ListVCards(VCardCommand):
                    'start': offset,
                    'end': offset + min(count, total - offset),
                    'loading': loading,
-                   'loaded': loaded
-               }))
+                   'loaded': loaded})
+        return self._success(
+            _("Listed %d/%d results") % (min(total, count), total),
+            result=self._vcard_list(vcards, mode=fmt, info=info))
 
 
 def ContactVCard(parent):
@@ -817,6 +821,13 @@ def ProfileVCard(parent):
 
         DEFAULT_KEYTYPE = 'RSA2048'
 
+        def _default_signature(self):
+            return _('Sent using Mailpile, Free Software from www.mailpile.is')
+
+        def _augment_list_info(self, info):
+            info['default_sig'] = self._default_signature()
+            return info
+
         def _yn(self, val, default='no'):
             return truthy(self.data.get(val, [default])[0])
 
@@ -851,10 +862,12 @@ def ProfileVCard(parent):
             elif protocol in ('smtp', 'smtptls', 'smtpssl'):
                 route.command = ''
                 route.name = vcard.email
-                for var in ('route-username', 'route-password',
-                            'route-auth_type', 'route-host', 'route-port'):
-                   rvar = var.split('-', 1)[1]
-                   route[rvar] = self.data.get(var, [''])[0]
+                for var in ('route-username', 'route-auth_type',
+                            'route-host', 'route-port'):
+                    rvar = var.split('-', 1)[1]
+                    route[rvar] = self.data.get(var, [''])[0]
+                if 'route-password' in self.data:
+                    route['password'] = self.data['route-password'][0]
             else:
                 raise ValueError(_('Unhandled outgoing mail protocol: %s'
                                    ) % protocol)
@@ -880,7 +893,6 @@ def ProfileVCard(parent):
                 protocol = self.data.get(prefix + 'protocol', ['none'])[0]
                 def configure_source(source):
                     source.host = ''
-                    source.password = ''
                     source.username = ''
                     source.enabled = self._yn(prefix + 'enabled')
                     source.discovery.create_tag = True
@@ -957,9 +969,11 @@ def ProfileVCard(parent):
                     disco.guess_tags = True
 
                     # Connection settings
-                    for rvar in ('protocol', 'auth_type', 'host', 'port',
-                                 'username', 'password'):
+                    for rvar in ('protocol', 'auth_type', 'username',
+                                 'host', 'port'):
                         source[rvar] = self.data.get(prefix + rvar, [''])[0]
+                    if (prefix + 'password') in self.data:
+                        source['password'] = self.data[prefix + 'password'][0]
                     if (self._yn(prefix + 'force-starttls')
                             and source.protocol == 'imap'):
                         source.protocol = 'imap_tls'
@@ -1006,8 +1020,10 @@ def ProfileVCard(parent):
             config.event_log.log_event(event)
 
         def _create_new_key(self, vcard, keytype):
-            passphrase = okay_random(26, self.session.config.master_key
+            passphrase = okay_random(20, self.session.config.master_key
                                      ).lower()
+            passphrase = '-'.join([passphrase[i:i+4] for i in
+                                   range(0, len(passphrase), 4)])
             random_uid = vcard.random_uid
             bits = int(keytype.replace('RSA', ''))
             key_args = {
@@ -1071,21 +1087,31 @@ def ProfileVCard(parent):
                 vcard.crypto_policy = 'none'
 
             # Crypto formatting rules
-            pgp_keys     = self._yn('security-attach-keys')
-            pgp_inline   = self._yn('security-prefer-inline')
-            pgp_hdr_enc  = self._yn('security-openpgp-header-encrypt')
-            pgp_hdr_sig  = self._yn('security-openpgp-header-sign')
-            pgp_hdr_none = self._yn('security-openpgp-header-none')
-            pgp_hdr_both = pgp_hdr_enc and pgp_hdr_sig
+            pgp_autocrypt    = self._yn('security-use-autocrypt')
+            pgp_publish      = self._yn('security-publish-to-keyserver')
+            pgp_keys         = self._yn('security-attach-keys')
+            pgp_inline       = self._yn('security-prefer-inline')
+            pgp_pgpmime      = self._yn('security-prefer-pgpmime')
+            pgp_obscure_meta = self._yn('security-obscure-metadata')
+            pgp_hdr_enc      = self._yn('security-openpgp-header-encrypt')
+            pgp_hdr_sig      = self._yn('security-openpgp-header-sign')
+            pgp_hdr_none     = self._yn('security-openpgp-header-none')
+            pgp_hdr_both     = pgp_hdr_enc and pgp_hdr_sig
             if pgp_hdr_both:
                 pgp_hdr_enc = pgp_hdr_sig = False
+            if pgp_pgpmime and pgp_inline:
+                pgp_pgpmime = pgp_inline = False
             vcard.crypto_format = ''.join([
-                'openpgp_header:SE+' if (pgp_hdr_both) else '',
-                'openpgp_header:S+'  if (pgp_hdr_sig)  else '',
-                'openpgp_header:E+'  if (pgp_hdr_enc)  else '',
-                'openpgp_header:N+'  if (pgp_hdr_none) else '',
-                'send_keys+'         if (pgp_keys)     else '',
-                'prefer_inline'      if (pgp_inline)   else 'pgpmime'
+                'openpgp_header:SE' if (pgp_hdr_both)     else '',
+                'openpgp_header:S'  if (pgp_hdr_sig)      else '',
+                'openpgp_header:E'  if (pgp_hdr_enc)      else '',
+                'openpgp_header:N'  if (pgp_hdr_none)     else '',
+                '+autocrypt'        if (pgp_autocrypt)    else '',
+                '+send_keys'        if (pgp_keys)         else '',
+                '+prefer_inline'    if (pgp_inline)       else '',
+                '+pgpmime'          if (pgp_pgpmime)      else '',
+                '+obscure_meta'     if (pgp_obscure_meta) else '',
+                '+publish'          if (pgp_publish)      else ''
             ])
 
     return ProfileVCardCommand
@@ -1110,18 +1136,25 @@ class AddProfile(ProfileVCard(AddVCard)):
         new_src_id = randomish_uid();
         return dict_merge(AddVCard._form_defaults(self), {
             'new_src_id': new_src_id,
+            'signature': self._default_signature(),
             'route-protocol': 'none',
+            'route-auth_type': 'password',
             'source-NEW-protocol': 'none',
+            'source-NEW-auth_type': 'password',
             'source-NEW-leave-on-server': True,
             'source-NEW-index-all-mail': True,
             'source-NEW-force-starttls': False,
             'source-NEW-copy-local': True,
             'source-NEW-delete-source': False,
             'security-best-effort-crypto': True,
+            'security-use-autocrypt': False,
             'security-always-sign': False,
             'security-always-encrypt': False,
-            'security-attach-keys': True,
-            'security-prefer-inline': True,
+            'security-always-encrypt': False,
+            'security-attach-keys': True,  # FIXME: Autocrypt changes this
+            'security-prefer-inline': False,
+            'security-prefer-pgpmime': False,
+            'security-obscure-metadata': False,
             'security-openpgp-header-encrypt': False,
             'security-openpgp-header-sign': True,
             'security-openpgp-header-none': False,
@@ -1188,25 +1221,33 @@ class EditProfile(AddProfile):
     def _vcard_to_post_vars(self, vcard):
         cp = vcard.crypto_policy or ''
         cf = vcard.crypto_format or ''
+        vc_sig = vcard.signature
+        default_sig = self._default_signature()
         pvars = {
             'rid': vcard.random_uid,
             'name': vcard.fn,
             'email': vcard.email,
+            'signature': default_sig if (vc_sig is None) else vc_sig,
             'password': '',
             'route-protocol': 'none',
+            'route-auth_type': 'password',
             'source-NEW-protocol': 'none',
+            'source-NEW-auth_type': 'password',
             'security-pgp-key': vcard.pgp_key or '',
             'security-best-effort-crypto': ('best-effort' in cp),
+            'security-use-autocrypt': ('autocrypt' in cf),
             'security-always-sign': ('sign' in cp),
             'security-always-encrypt': ('encrypt' in cp),
             'security-attach-keys': ('send_keys' in cf),
             'security-prefer-inline': ('prefer_inline' in cf),
+            'security-prefer-pgpgmime': ('pgpmime' in cf),
+            'security-obscure-metadata': ('obscure_meta' in cf),
             'security-openpgp-header-encrypt': ('openpgp_header:E' in cf or
                                                 'openpgp_header:SE' in cf),
             'security-openpgp-header-sign': ('openpgp_header:S' in cf or
                                              'openpgp_header:ES' in cf),
             'security-openpgp-header-none': ('openpgp_header:N' in cf),
-            'security-publish-to-keyserver': False
+            'security-publish-to-keyserver': ('publish' in cf)
         }
         route = self.session.config.routes.get(vcard.route or 'ha ha ha')
         if route:
@@ -1216,19 +1257,21 @@ class EditProfile(AddProfile):
                 'route-port': route.port,
                 'route-username': route.username,
                 'route-password': route.password,
-                'route-auth_type': route.auth_type,
+                'route-auth_type': route.auth_type or 'password',
                 'route-command': route.command
             })
         pvars['sources'] = vcard.sources()
         for sid in pvars['sources']:
             prefix = 'source-%s-' % sid
-            source = self.session.config.sources.get(sid)   
+            source = self.session.config.sources.get(sid)
             disco = source.discovery
             info = {}
             for rvar in ('protocol', 'auth_type', 'host', 'port',
                          'username', 'password'):
                 info[prefix + rvar] = source[rvar]
             dp = disco.policy
+            if not info[prefix + 'auth_type']:
+                info[prefix + 'auth_type'] = 'password'
             info[prefix + 'leave-on-server'] = (dp not in 'move')
             info[prefix + 'index-all-mail'] = (dp in ('move', 'sync', 'read')
                                                and disco.local_copy)
@@ -1245,7 +1288,7 @@ class EditProfile(AddProfile):
     def command(self):
         idx = self._idx()  # Make sure VCards are all loaded
         session, config = self.session, self.session.config
-      
+
         # OK, fetch the VCard.
         assert('rid' in self.data and len(self.data['rid']) == 1)
         vcard = config.vcards.get_vcard(self.data['rid'][0])
@@ -1316,6 +1359,37 @@ class ChooseFromAddress(Command):
         })
 
 
+class ContentTxf(EmailTransform):
+    def TransformOutgoing(self, sender, rcpts, msg, **kwargs):
+        txf_matched, txf_continue = False, True
+
+        profile = self._get_sender_profile(sender, kwargs)
+        sig = profile.get('signature')
+        if sig:
+            part = self._get_first_part(msg, 'text/plain')
+            if part is not None:
+                msg_text = (part.get_payload(decode=True) or '\n\n'
+                            ).replace('\r', '').decode('utf-8')
+                if '\n-- \n' not in msg_text:
+                    msg_text = msg_text.strip() + '\n\n-- \n' + sig
+                    try:
+                        msg_text.encode('us-ascii')
+                        need_utf8 = False
+                    except (UnicodeEncodeError, UnicodeDecodeError):
+                        msg_text = msg_text.encode('utf-8')
+                        need_utf8 = True
+
+                    part.set_payload(msg_text)
+                    if need_utf8:
+                        part.set_charset('utf-8')
+                        while 'content-transfer-encoding' in part:
+                            del part['content-transfer-encoding']
+                        encoders.encode_base64(part)
+
+                    txf_matched = True
+
+        return sender, rcpts, msg, txf_matched, txf_continue
+
 
 _plugins.register_commands(VCard, AddVCard, RemoveVCard, ListVCards,
                            VCardAddLines, VCardSet, VCardRemoveLines)
@@ -1325,3 +1399,5 @@ _plugins.register_commands(Profile, AddProfile, EditProfile,
                            RemoveProfile, ListProfiles, ProfileSet,
                            ChooseFromAddress)
 _plugins.register_commands(ContactImport, ContactImporters)
+
+_plugins.register_outgoing_email_content_transform('100_sender_vc', ContentTxf)
