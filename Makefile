@@ -111,6 +111,7 @@ clean:
 	        mailpile-tmp.py mailpile.py \
 	        ChangeLog AUTHORS \
 	        .appver MANIFEST .SELF .*deps \
+                dist/*.tar.gz dist/*.deb dist/*.rpm \
 	        scripts/less-compiler.mk ghostdriver.log
 	@rm -rf *.egg-info build/ \
                mailpile/tests/data/tmp/ testing/tmp/
@@ -118,7 +119,7 @@ clean:
 
 mrproper: clean
 	@rm -rf shared-data/locale/?? shared-data/locale/??[_@]*
-	@rm -rf dist/ bower_components/ shared-data/locale/mailpile.pot
+	@rm -rf bower_components/ shared-data/locale/mailpile.pot
 	@rm -rf mp-virtualenv/
 	git reset --hard && git clean -dfx
 
@@ -205,23 +206,27 @@ transifex:
 # BUILD
 # -----------------------------------------------------------------------------
 
-tarball: mrproper js genmessages transifex
+dist/version.txt: mailpile/config/defaults.py scripts/version.py
+	mkdir -p dist
+	scripts/version.py > dist/version.txt
+
+dist/mailpile.tar.gz: mrproper js genmessages transifex dist/version.txt
 	git submodule update --init --recursive
 	git submodule foreach 'git reset --hard && git clean -dfx'
-	tar --exclude='./packages/debian' --exclude-vcs -czf /tmp/mailpile.tar.gz -C $(shell pwd) .
-	mv /tmp/mailpile.tar.gz .
+	mkdir -p dist
+	scripts/version.py > dist/version.txt
+	tar --exclude='./packages/debian' --exclude=dist --exclude-vcs -czf dist/mailpile-$$(cat dist/version.txt).tar.gz -C $(shell pwd) .
+	(cd dist; ln -fs mailpile-$$(cat version.txt).tar.gz mailpile.tar.gz)
 
-dpkg: tarball
-	if [ ! -d dist ]; then \
-	    mkdir dist; \
-	fi;
-	if [ -e ./dist/*.deb ]; then \
-	    sudo rm ./dist/*.deb; \
-	fi;
-	sudo docker build \
+.dockerignore: dist/version.txt packages/Dockerfile_debian packages/debian packages/debian/rules
+	mkdir -p dist
+	docker build \
 	    --file=packages/Dockerfile_debian \
 	    --tag=mailpile-deb-builder \
 	    ./
-	sudo docker run \
-	    --volume=$$(pwd)/dist:/mnt/dist \
+	touch .dockerignore
+
+dpkg: dist/mailpile.tar.gz .dockerignore
+	docker run \
+	    --rm --volume=$$(pwd)/dist:/mnt/dist \
 	    mailpile-deb-builder

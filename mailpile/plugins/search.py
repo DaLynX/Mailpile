@@ -208,7 +208,7 @@ class SearchResults(dict):
 
     def _msg_tags(self, msg_info):
         tids = [t for t in msg_info[MailIndex.MSG_TAGS].split(',')
-                if t and t in self.session.config.tags]
+                if t and self.session.config.tags.get(t)]
         return tids
 
     def _tag(self, tid, attributes={}):
@@ -959,7 +959,7 @@ class Search(Command):
             except ValueError:
                 self._email_view_pairs = {}
 
-        if 'flat' in session.order:
+        if 'flat' in (session.order or ''):
             # Above we have guaranteed that the target message is in the
             # result set; unset this dictionary to force a flat display
             # of the chosen message.

@@ -319,14 +319,15 @@ class MailIndex(BaseIndex):
 
     def update_ptrs_and_msgids(self, session):
         session.ui.mark(_('Updating high level indexes'))
-        for offset in range(0, len(self.INDEX)):
-            message = self.l2m(self.INDEX[offset])
-            if len(message) == self.MSG_FIELDS_V2:
-                self.MSGIDS[message[self.MSG_ID]] = offset
-                for msg_ptr in message[self.MSG_PTRS].split(','):
-                    self.PTRS[msg_ptr] = offset
-            else:
-                session.ui.warning(_('Bogus line: %s') % line)
+        with self._lock:
+            for offset in range(0, len(self.INDEX)):
+                message = self.l2m(self.INDEX[offset])
+                if len(message) == self.MSG_FIELDS_V2:
+                    self.MSGIDS[message[self.MSG_ID]] = offset
+                    for msg_ptr in message[self.MSG_PTRS].split(','):
+                        self.PTRS[msg_ptr] = offset
+                else:
+                    session.ui.warning(_('Bogus line: %s') % line)
 
     def _remove_location(self, session, msg_ptr):
         msg_idx_pos = self.PTRS[msg_ptr]
@@ -1000,10 +1001,15 @@ class MailIndex(BaseIndex):
                 msg_body,                            # Snippet etc.
                 ','.join(tags),                      # Initial tags
                 '',                                  # No replies for now
-                msg_mid                              # Conversation ID
-            ]
+                msg_mid]                             # Conversation ID
+
             if msg_from:
-                email, fn = ExtractEmailAndName(msg_from)
+                ahp = AddressHeaderParser(msg_from)
+                if ahp:
+                    fn = ahp[0].fn
+                    email = ahp[0].address
+                else:
+                    email, fn = ExtractEmailAndName(msg_from)
             else:
                 email = fn = None
             if email and fn:
@@ -1451,14 +1457,17 @@ class MailIndex(BaseIndex):
         return [r for r in taglist if r in self.config.tags]
 
     def add_tag(self, session, tag_id,
-                msg_info=None, msg_idxs=None, conversation=False):
+                msg_info=None, msg_idxs=None,
+                conversation=False, allow_message_id_clearing=False):
         if msg_info and msg_idxs is None:
             msg_idxs = set([int(msg_info[self.MSG_MID], 36)])
         else:
             msg_idxs = set(msg_idxs)
         if not msg_idxs:
             return set()
+
         CachedSearchResultSet.DropCaches()
+
         if conversation:
             session.ui.mark(_n('Tagging %d conversation (%s)',
                            'Tagging %d conversations (%s)',
@@ -1474,25 +1483,42 @@ class MailIndex(BaseIndex):
                            'Tagging %d messages (%s)',
                            len(msg_idxs)
                            ) % (len(msg_idxs), tag_id))
+
+        clear_message_id = False
+        if allow_message_id_clearing:
+            if session.config.tags[tag_id].type == 'trash':
+                 clear_message_id = True
+
         eids = set()
         added = set()
         threads = set()
         for msg_idx in msg_idxs:
             if msg_idx >= 0 and msg_idx < len(self.INDEX):
+                modified = False
                 msg_info = self.get_msg_at_idx_pos(msg_idx)
                 tags = set([r for r in msg_info[self.MSG_TAGS].split(',')
-                            if r])
+                            if r and r in session.config.tags])
                 if tag_id not in tags:
                     tags.add(tag_id)
                     msg_info[self.MSG_TAGS] = ','.join(list(tags))
+                    added.add(msg_idx)
+                    threads.add(msg_info[self.MSG_THREAD_MID].split('/')[0])
+                    modified = True
+                if clear_message_id:
+                    old_msgid = msg_info[self.MSG_ID]
+                    if old_msgid in self.MSGIDS:
+                        del self.MSGIDS[old_msgid]
+                    msg_info[self.MSG_ID] = self._encode_msg_id('%s' % msg_idx)
+                    self.MSGIDS[msg_info[self.MSG_ID]] = msg_idx
+                    modified = True
+                if modified:
                     self.INDEX[msg_idx] = self.m2l(msg_info)
                     self.MODIFIED.add(msg_idx)
                     self.update_msg_sorting(msg_idx, msg_info)
                     if msg_idx in self.CACHE:
                         del self.CACHE[msg_idx]
-                    added.add(msg_idx)
-                    threads.add(msg_info[self.MSG_THREAD_MID].split('/')[0])
                 eids.add(msg_idx)
+
         with self._lock:
             if tag_id in self.TAGS:
                 self.TAGS[tag_id] |= eids
@@ -1545,7 +1571,7 @@ class MailIndex(BaseIndex):
             if msg_idx >= 0 and msg_idx < len(self.INDEX):
                 msg_info = self.get_msg_at_idx_pos(msg_idx)
                 tags = set([r for r in msg_info[self.MSG_TAGS].split(',')
-                            if r])
+                            if r and r in session.config.tags])
                 if tag_id in tags:
                     tags.remove(tag_id)
                     msg_info[self.MSG_TAGS] = ','.join(list(tags))

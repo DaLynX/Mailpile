@@ -6038,6 +6038,9 @@ div.settings-page,
     width: 100%;
   }
 }
+section.account-list {
+  margin-right: 5px;
+}
 section.account-list table {
   margin: auto;
   background: none;
@@ -6095,6 +6098,9 @@ section.motd a.motd-signed {
   margin-top: 0.5em;
   text-align: right;
   padding-right: 2em;
+}
+section.motd .version-info {
+  padding-left: 0.5em;
 }
 /* Connection Down */
 #connection-down {
@@ -6909,8 +6915,8 @@ div.notification-bubble span.action {
 }
 .form-search input {
   width: 282px;
-  height: 18px;
-  padding: 9px 12px;
+  height: 20px;
+  padding: 8px 12px;
   float: left;
   font: normal 18px "HelveticaNeue", "Helvetica Neue", Helvetica, Arial, sans-serif;
   border: 0;
@@ -9684,7 +9690,7 @@ a.modal-tag-color-option:hover {
   }
   #sidebar-lists ul,
   #sidebar a.sidebar-tag,
-  #sidebar-lists ul li {
+  #sidebar-lists ul li:not(.hide) {
     display: inline-block;
     text-align: center;
     vertical-align: top;
@@ -9920,7 +9926,8 @@ a.modal-tag-color-option:hover {
   }
   /* Stuff we just hide... */
   #sidebar hr,
-  #notifications-header {
+  #notifications-header,
+  #pile-speed {
     display: none;
   }
   #pile-results,
@@ -9948,12 +9955,12 @@ a.modal-tag-color-option:hover {
     position: absolute;
     top: 0px;
     left: 0px;
-    padding-right: 5px;
-    width: 40px;
-    height: 40px;
+    width: 50px;
+    height: 50px;
   }
   #pile-results td.avatar a img,
   #pile-results.comfy td.avatar a img {
+    margin: 5px 5px 5px 0px;
     width: 40px;
     height: 40px;
   }
@@ -10046,15 +10053,23 @@ a.modal-tag-color-option:hover {
   div.footer-nav {
     display: none;
   }
-  #pile-speed {
-    margin-bottom: 0px;
-    font-size: 70%;
-  }
   #display-density-selector {
     display: none;
   }
   #pile-more {
     display: none;
+  }
+  #pile-bottom .button-primary {
+    width: 49.3%;
+    float: none;
+    text-align: center;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  /* Single  footer button case */
+  #pile-previous.button-primary:last-of-type,
+  #pile-next.button-primary:nth-of-type(2) {
+    width: 100%;
   }
   table.account-list {
     margin: 0 0 !important;
@@ -10074,4 +10089,108 @@ a.modal-tag-color-option:hover {
     display: block;
     border: none;
   }
+}
+/* Terminal */
+#terminal_blanket {
+  position: fixed;
+  z-index: 99999;
+  width: 100%;
+  height: 100%;
+  display: none;
+  background: none;
+  opacity: 0.0;
+}
+#terminal {
+  position: fixed;
+  z-index: 100000;
+  width: 100%;
+  height: 350px;
+  display: none;
+  background: #000;
+  opacity: 0.9;
+  font-family: monospace;
+  font-size: 14px;
+  color: #eee;
+  /*
+     * For now we're disabling the debug window for now because it's incomplete.
+     * TODO: Bring this to life! -- @smari 2017-07-24
+     *
+    #debug_container {
+        background: #500;
+        top: 0px;
+        bottom: 0px;
+        right: 0px;
+        position: absolute;
+        width: 40%;
+
+        #debug_output {
+            overflow-y: scroll;
+            overflow-x: hidden;
+            position: absolute;
+            top: 0px;
+            bottom: 0px;
+            left: 3px;
+            right: 0px;
+        }
+    }
+    */
+}
+#terminal div.output {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  position: relative;
+  bottom: 0px;
+  vertical-align: bottom;
+  background: none;
+  padding: 0px;
+  margin: 0px;
+  padding-top: 3px;
+  color: #eee;
+  border: 0px;
+}
+#terminal #console {
+  position: absolute;
+  top: 0px;
+  bottom: 0px;
+  left: 0px;
+  width: 100%;
+}
+#terminal #console #terminal_output {
+  display: block;
+  position: absolute;
+  top: 0px;
+  bottom: 25px;
+  left: 0px;
+  right: 0px;
+  padding: 6px;
+  overflow-y: scroll;
+  overflow-x: hidden;
+}
+#terminal #console #terminal_input {
+  height: 20px;
+  background: #000;
+  position: absolute;
+  border-top: 1px solid #ccc;
+  width: 100%;
+  padding: 3px;
+  padding-left: 6px;
+  padding-right: 6px;
+  bottom: 0px;
+}
+#terminal #console #terminal_input #terminal_halfsize_button {
+  display: none;
+}
+#terminal #console #terminal_input form {
+  display: inline-block;
+  width: 90%;
+}
+#terminal #console #terminal_input input {
+  outline: none;
+  display: inline-block;
+  width: 100%;
+  background: none;
+  border: none;
+  font-family: monospace;
+  color: #eee;
+  font-size: 15px;
 }

@@ -417,7 +417,7 @@ class BrowseOrLaunch(Command):
         try:
             socket.create_connection(sspec[:2])
             self.Browse(sspec)
-            os._exit(1)
+            os._exit(127)
         except IOError:
             pass
 
@@ -819,19 +819,29 @@ class GpgCommand(Command):
 
     class CommandResult(Command.CommandResult):
         def as_text(self):
+            if self.result:
+                return '%s\n\n%s' % (
+                    (self.result['stdout'] or _('(no output)')).strip(),
+                    self.message)
             return '%s' % self.message
 
     def command(self, args=None):
         args = list((args is None) and self.args or args or [])
-
-        # FIXME: For this to work anywhere but in a terminal, we'll need
-        #        to somehow pipe input to/from GPG in a more sane way.
-
         binary, rv = self._gnupg().gpgbinary, '(unknown)'
         with self.session.ui.term:
             try:
                 self.session.ui.block()
-                rv = os.system(' '.join([binary] + args))
+                if (self.session.ui.interactive and
+                        self.session.ui.render_mode == 'text'):
+                    rv = os.system(' '.join([binary] + args))
+                    stdout = None
+                else:
+                    sp = subprocess.Popen(
+                        [binary] + ['--batch', '--no-tty'] + args,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        stdin=subprocess.PIPE)
+                    (stdout, stderr) = sp.communicate(input='')
+                    rv = sp.wait()
                 from mailpile.plugins.vcard_gnupg import PGPKeysImportAsVCards
                 PGPKeysImportAsVCards(self.session).run()
             except:
@@ -839,7 +849,9 @@ class GpgCommand(Command):
 
         return self._success(_("That was fun!") + ' ' +
                              _("%s returned: %s") % (binary, rv),
-                             result={'binary': binary, 'returned': rv})
+                             result={'binary': binary,
+                                     'stdout': stdout,
+                                     'returned': rv})
 
 
 class ListDir(Command):
@@ -1643,7 +1655,7 @@ class Pipe(Command):
 
 class Quit(Command):
     """Exit Mailpile, normal shutdown"""
-    SYNOPSIS = ("q", "quit", "quitquitquit", None)
+    SYNOPSIS = ("q", "quit", "quitquitquit", '[restart]')
     ABOUT = ("Quit mailpile")
     ORDER = ("Internals", 2)
     CONFIG_REQUIRED = False
@@ -1651,20 +1663,32 @@ class Quit(Command):
     COMMAND_SECURITY = security.CC_QUIT
 
     def command(self):
-        mailpile.util.QUITTING = True
+        if 'restart' in self.args:
+            mailpile.util.QUITTING = 'restart'
+        else:
+            mailpile.util.QUITTING = mailpile.util.QUITTING or True
+
         self._background_save(index=True, config=True, wait=True)
         if self.session.config.http_worker:
             self.session.config.http_worker.quit()
+
         try:
             import signal
             os.kill(mailpile.util.MAIN_PID, signal.SIGINT)
         except:
-            def exiter():
-                time.sleep(1)
-                os._exit(0)
-            threading.Thread(target=exiter).start()
+            pass
+
+        # This puts a hard deadline on the shutdown process.
+        # This is a dangerous thing.
+        def exiter():
+            time.sleep(15)
+            os._exit(0)
+        ex = threading.Thread(target=exiter)
+        ex.daemon = True
+        ex.start()
 
         return self._success(_('Shutting down...'))
+
 
 class IdleQuit(Command):
     """Shut down Mailpile if it has been idle for a while"""
@@ -1713,7 +1737,7 @@ class Abort(Command):
     COMMAND_SECURITY = security.CC_QUIT
 
     def command(self):
-        mailpile.util.QUITTING = True
+        mailpile.util.QUITTING = mailpile.util.QUITTING or True
         if 'no_save' not in self.data:
             self._background_save(index=True, config=True, wait=True,
                                   wait_callback=lambda: os._exit(1))

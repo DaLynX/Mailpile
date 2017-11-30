@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import mailpile.security as security
 from mailpile.commands import Command
 from mailpile.i18n import gettext as _
@@ -179,10 +180,26 @@ def GetTagID(cfg, tn):
 def GuessTags(cfg, name):
     tags = set()
     name = name.lower()
+    # When guessing tag/folder names not in localized language
+    # let's also try some common mappings/translations
+    # FIXME: decide how to tread 'trash' folders on servers
+    TYPICAL_FOLDER_NAMES = {u'gesendet': 'sent',
+                            u'gelöscht': 'trash',
+                            u'entwürfe': 'drafts',
+                            u'spamverdacht': 'spam',
+                            u'éléments envoyés': 'sent',
+                            u'éléments supprimés': 'trash',
+                            u'brouillons': 'drafts',
+    }
+    try:
+        tname = TYPICAL_FOLDER_NAMES[name]
+    except KeyError:
+        tname = ''
     for tagtype in ('inbox', 'drafts', 'sent', 'spam'):
         for tag in cfg.get_tags(type=tagtype):
             if (name.endswith(tag.name.lower()) or
-                    name.endswith(_(tag.name).lower())):
+                    name.endswith(_(tag.name).lower()) or
+                    tname.endswith(tag.name.lower())):
                 tags.add(tag._key)
     return tags
 
@@ -727,6 +744,7 @@ class DeleteTag(TagCommand):
         session, config = self.session, self.session.config
         clean_session = mailpile.ui.Session(config)
         clean_session.ui = session.ui
+        clean_session.order = 'all-flat'
         result = []
 
         tag_names = []
@@ -744,9 +762,10 @@ class DeleteTag(TagCommand):
 
                 # FIXME: Refuse to delete tag if in use by filters
 
-                rv = (Search(clean_session, arg=['tag:%s' % tag_id]).run() and
-                      Tag(clean_session, arg=['-%s' % tag_id, 'all']).run())
-                if rv:
+                msgs = set(config.index.TAGS.get(tag_id, set()))
+                rem = config.index.remove_tag(clean_session, tag_id,
+                                              msg_idxs=msgs)
+                if not config.index.TAGS.get(tag_id, set()):
                     del config.tags[tag_id]
                     result.append({'name': tag.name, 'tid': tag_id})
                 else:

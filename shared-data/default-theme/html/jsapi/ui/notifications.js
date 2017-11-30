@@ -73,7 +73,7 @@ Mailpile.mailsource_login = function(mailsource_id, event_id) {
 
 Mailpile.mailsource_oauth2 = function(mailsource_id, event_id) {
   var url = Mailpile.API.U('/setup/oauth2/?mailsource=' + mailsource_id);
-  Mailpile.auto_modal({ url: url, method: 'POST' });
+  Mailpile.auto_modal({ url: url, method: 'POST', sticky: true });
   //Mailpile.cancel_notification(event_id, false, false, true);
 };
 
@@ -191,13 +191,16 @@ Mailpile.notification = function(result) {
   // Show Notification
   var $elem = Mailpile.cancel_notification(result.event_id, undefined, 'keep');
   var notification_template = Mailpile.unsafe_template($('#template-notification-bubble').html());
+  // Remove excess whitespace from notification to avoid creating TextNodes in the
+  // DOM. Fixes a subtle memory leak (https://github.com/mailpile/Mailpile/issues/1931).
+  var notification_html = notification_template(result).trim();
   if ($elem) {
-      $elem.replaceWith(notification_template(result));
+      $elem.replaceWith(notification_html);
   }
   else {
       var bubbles = $('#notification-bubbles');
       if (bubbles.children().length < 15) {
-          bubbles.prepend($(notification_template(result)).slideDown('normal'));
+          bubbles.prepend($(notification_html).slideDown('normal'));
           $('.notifications-close-all span').show();
       }
   }
@@ -297,15 +300,23 @@ EventLog.subscribe('.*(Add|Edit)Profile', function(ev) {
           $icon.removeClass('unconfigured');
           $icon.removeClass('icon-clock').removeClass('icon-lock-open');
           $icon.addClass('configured').addClass('icon-lock-closed');
+          ev.timeout = 60000; // Keep completed notification up for 1 minute
       }
       else {
           $icon.removeClass('configured');
           $icon.removeClass('icon-lock-open').removeClass('icon-lock-closed');
           $icon.addClass('unconfigured').addClass('icon-clock');
+          if (ev.data.keygen_gotlock > 0) {
+              ev.action_url = "{{ U('/page/entropy/') }}";
+              ev.action_cls = 'auto-modal';
+              ev.action_text = '{{_("learn more")|escapejs}}';
+              ev.message2 = '{{_("This may take some time!")|escapejs}}';
+          }
       }
       Mailpile.notification(ev);
   }
 });
+
 EventLog.subscribe('.*mail_source.*', function(ev) {
   //
   // Mail source notifications behave differently depending on which
@@ -358,11 +369,20 @@ EventLog.subscribe('.*mail_source.*', function(ev) {
     ev.action_text = '{{_("please log in")|escapejs}}';
     ev.action_js = ("onclick=\"Mailpile.mailsource_login('"
        + ev.data.id + "','" + ev.event_id + "');\"");
+    if (!EventLog.seen_event_recently(ev.data.profile_id)) {
+      EventLog.just_saw_event(ev.data.profile_id);
+      Mailpile.mailsource_login(ev.data.id, ev.event_id);
+    }
   }
   else if (conn_error == 'oauth2') {
     ev.action_text = '{{_("grant access")|escapejs}}';
     ev.action_js = ("onclick=\"Mailpile.mailsource_oauth2('"
        + ev.data.id + "','" + ev.event_id + "');\"");
+    console.log(ev.data);
+    if (!EventLog.seen_event_recently(ev.data.profile_id)) {
+       EventLog.just_saw_event(ev.data.profile_id);
+       Mailpile.mailsource_oauth2(ev.data.id, ev.event_id);
+    }
   }
   ev.icon = 'icon-mailsource';
   Mailpile.notification(ev);

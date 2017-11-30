@@ -975,7 +975,6 @@ class BaseMailSource(threading.Thread):
             self.alive = True
 
         self._load_state()
-        self.event.flags = Event.RUNNING
         _original_session = self.session
 
         def sleeptime():
@@ -989,6 +988,7 @@ class BaseMailSource(threading.Thread):
             self.event.data['enabled'] = self.my_config.enabled
             self.event.data['profile_id'] = self.my_config.profile
             if self.my_config.enabled:
+                self.event.flags = Event.RUNNING
                 self._loop_count += 1
             else:
                 if self._loop_count > 1:
@@ -1093,7 +1093,7 @@ class BaseMailSource(threading.Thread):
         self.interrupt_rescan(_('Shut down'))
         self.alive = False
         self.wake_up()
-        if join:
+        if join and self.isAlive():
             self.join()
 
 
